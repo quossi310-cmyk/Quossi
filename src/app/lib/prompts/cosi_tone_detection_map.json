@@ -1,0 +1,30 @@
+{
+  "positive": {
+    "keywords": ["great", "awesome", "fantastic", "love", "happy", "thank you", "perfect", "wonderful", "excellent", "glad"],
+    "emotions": ["joy", "satisfaction", "gratitude", "optimism"]
+  },
+  "neutral": {
+    "keywords": ["okay", "fine", "alright", "maybe", "sure", "not sure", "hmm", "I see", "understand", "noted"],
+    "emotions": ["neutrality", "uncertainty", "indifference"]
+  },
+  "negative": {
+    "keywords": ["bad", "hate", "angry", "upset", "disappointed", "terrible", "awful", "annoyed", "sad", "frustrated"],
+    "emotions": ["anger", "sadness", "disappointment", "frustration"]
+  },
+  "questioning": {
+    "keywords": ["why", "how", "what", "when", "where", "?", "can you", "could you", "is it", "are you"],
+    "emotions": ["curiosity", "confusion", "seeking information"]
+  },
+  "sarcastic": {
+    "keywords": ["yeah right", "sure thing", "as if", "totally", "of course (negative context)", "amazing (negative context)"],
+    "emotions": ["sarcasm", "mockery", "irony"]
+  },
+  "urgent": {
+    "keywords": ["now", "immediately", "urgent", "asap", "right away", "hurry", "quick", "fast"],
+    "emotions": ["stress", "urgency", "impatience"]
+  },
+  "apologetic": {
+    "keywords": ["sorry", "apologies", "my bad", "forgive me", "oops", "didn’t mean to"],
+    "emotions": ["regret", "remorse"]
+  }
+}

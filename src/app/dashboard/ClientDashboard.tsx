@@ -1,14 +1,10 @@
-// pages/index.tsx (Option A: StatusBar below content, safe-area paddings removed on mobile)
+// pages/index.tsx (updated with toast for voice call)
 "use client";
 
 import Image from "next/image";
 import { useState, KeyboardEvent, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@supabase/supabase-js";
-
-/* === Capacitor StatusBar (Option A) === */
-import { Capacitor } from "@capacitor/core";
-import { StatusBar, Style } from "@capacitor/status-bar";
 
 /* ================= QSCORE TYPES ================= */
 type Tone = "positive" | "neutral" | "stressed";
@@ -81,18 +77,18 @@ function MessageBubble({ m }: { m: Message }) {
   );
 }
 
+/** Compact badge + expandable panel for QScore (renders ONLY when qscore exists) */
 function QScorePanel({ q }: { q: QScoreResult | null }) {
   if (!q) return null;
 
   const toneColor =
-    q.tone === "positive"
-      ? "bg-emerald-500/20 text-emerald-200 border-emerald-500/40"
-      : q.tone === "stressed"
-      ? "bg-rose-500/20 text-rose-200 border-rose-500/40"
-      : "bg-slate-500/20 text-slate-200 border-slate-500/40";
+    q.tone === "positive" ? "bg-emerald-500/20 text-emerald-200 border-emerald-500/40" :
+    q.tone === "stressed" ? "bg-rose-500/20 text-rose-200 border-rose-500/40" :
+    "bg-slate-500/20 text-slate-200 border-slate-500/40";
 
   return (
     <div className="animate-slide-up">
+      {/* Badge row */}
       <div className="flex items-center gap-2">
         <span className={`px-2 py-1 text-xs rounded-md border ${toneColor}`}>Tone: {q.tone}</span>
         <span className="px-2 py-1 text-xs rounded-md border border-yellow-400/40 bg-yellow-400/10 text-yellow-200">
@@ -103,77 +99,16 @@ function QScorePanel({ q }: { q: QScoreResult | null }) {
         </span>
       </div>
 
+      {/* Task card */}
       {q.task && (
         <div className="mt-2 p-3 rounded-lg border border-white/10 bg-white/5">
           <div className="text-xs uppercase tracking-wide text-white/60 mb-1">Suggested Task</div>
           <div className="text-sm text-white/90">{q.task}</div>
-          <div className="mt-1 text-[11px] text-white/50">Generated: {new Date(q.runAt).toLocaleString()}</div>
+          <div className="mt-1 text-[11px] text-white/50">
+            Generated: {new Date(q.runAt).toLocaleString()}
+          </div>
         </div>
       )}
-    </div>
-  );
-}
-
-/* ============== AUTH PROMPT MODAL ============== */
-function AuthPromptModal({
-  open,
-  onClose,
-  onSignin,
-  onSignup,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onSignin: () => void;
-  onSignup: () => void;
-}) {
-  if (!open) return null;
-  return (
-    <div role="dialog" aria-modal="true" aria-label="Sign in or create account" className="fixed inset-0 z-[100] flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div
-        className="relative z-[101] w-[92%] max-w-md rounded-2xl border border-white/15 bg-[#0b0b0b]/95 text-white shadow-2xl animate-auth-pop"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="absolute inset-0 -z-10 rounded-2xl bg-gradient-to-br from-blue-500/15 via-yellow-400/10 to-white/5 blur-2xl" />
-        <div className="px-5 pt-5 pb-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold">Create an account</h3>
-            <button
-              onClick={onClose}
-              aria-label="Close"
-              className="w-9 h-9 grid place-items-center rounded-lg border border-white/15 bg-white/10 hover:bg-white/15 active:scale-95"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M6 6l12 12M18 6L6 18" stroke="white" strokeWidth="1.8" strokeLinecap="round" />
-              </svg>
-            </button>
-          </div>
-
-          <p className="mt-2 text-sm text-white/80">
-            Unlock your dashboard, save chats, and get paid with QUOSSI. Login if you already have an account, or sign up in seconds.
-          </p>
-
-          <div className="mt-5 grid grid-cols-1 gap-2">
-            <button onClick={onSignin} className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 bg-white text-black font-semibold hover:bg-white/90 active:scale-98 transition">
-              <span>Login</span>
-            </button>
-            <button onClick={onSignup} className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 bg-yellow-400 text-black font-semibold hover:bg-yellow-300 active:scale-98 transition">
-              <span>Create account</span>
-            </button>
-          </div>
-
-          <button onClick={onClose} className="mt-3 w-full text-center text-sm text-white/70 hover:text-white underline underline-offset-4">
-            Not now
-          </button>
-        </div>
-      </div>
-      <style jsx>{`
-        @keyframes auth-pop {
-          0% { transform: translateY(12px) scale(0.98); opacity: 0; }
-          100% { transform: translateY(0) scale(1); opacity: 1; }
-        }
-        .animate-auth-pop { animation: auth-pop 180ms ease-out both; }
-      `}</style>
     </div>
   );
 }
@@ -193,64 +128,16 @@ export default function Home() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showMobileChat, setShowMobileChat] = useState(false);
 
+  // QScore state (only shown when backend "allows")
   const [qscore, setQscore] = useState<QScoreResult | null>(null);
 
+  // ===== Toast state + helper =====
   const [toast, setToast] = useState<{ open: boolean; text: string }>({ open: false, text: "" });
   function notify(msg: string, ms = 2200) {
     setToast({ open: true, text: msg });
     window.clearTimeout((notify as any)._t);
     (notify as any)._t = window.setTimeout(() => setToast((t: any) => ({ ...t, open: false })), ms);
   }
-
-  const [authPromptOpen, setAuthPromptOpen] = useState(false);
-  const [isAuthed, setIsAuthed] = useState<boolean | null>(null);
-
-  /* === Initialize Capacitor StatusBar: Option A === */
-  useEffect(() => {
-    // Only on native Android
-    if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== "android") return;
-    (async () => {
-      try {
-        await StatusBar.setOverlaysWebView({ overlay: false }); // <<< Key line (keeps content below status bar)
-        await StatusBar.setStyle({ style: Style.Dark });
-        await StatusBar.setBackgroundColor({ color: "#000000" });
-      } catch {
-        // ignore on web or if plugin not installed
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
-    // Check auth status once
-    let mounted = true;
-    (async () => {
-      try {
-        if (!supabase) return setIsAuthed(false);
-        const { data } = await supabase.auth.getUser();
-        if (mounted) setIsAuthed(!!data?.user);
-      } catch {
-        if (mounted) setIsAuthed(false);
-      }
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (isAuthed) return;
-    const openTimeout = window.setTimeout(() => setAuthPromptOpen(true), 30_000);
-    const intervalId = window.setInterval(() => setAuthPromptOpen(true), 30_000);
-    const onKey = (e: KeyboardEvent) => {
-      if ((e as any).key === "Escape") setAuthPromptOpen(false);
-    };
-    window.addEventListener("keydown", onKey as any);
-    return () => {
-      window.clearTimeout(openTimeout);
-      window.clearInterval(intervalId);
-      window.removeEventListener("keydown", onKey as any);
-    };
-  }, [isAuthed]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -265,6 +152,7 @@ export default function Home() {
   const deskMessagesRef = useRef<HTMLDivElement>(null);
   const mobileMessagesRef = useRef<HTMLDivElement>(null);
 
+  // run-once guard for initial QScore validation
   const hasValidatedOnceRef = useRef(false);
 
   const jumpToBottom = (el: HTMLDivElement | null, smooth = false) => {
@@ -273,6 +161,7 @@ export default function Home() {
     else el.scrollTop = el.scrollHeight;
   };
 
+  // Load chat only (<=7 days old). DO NOT auto-load qscore from localStorage.
   useEffect(() => {
     const load = () => {
       const stored = localStorage.getItem(STORAGE_KEY);
@@ -290,9 +179,11 @@ export default function Home() {
     return () => clearInterval(id);
   }, []);
 
+  // After first load, validate once with backend. If not allowed, ensure QScore is hidden.
   useEffect(() => {
     if (hasValidatedOnceRef.current) return;
     hasValidatedOnceRef.current = true;
+
     const t = setTimeout(() => {
       const history = messages.map((m) => ({ role: m.role, content: m.text }));
       if (history.length) {
@@ -324,6 +215,7 @@ export default function Home() {
     }
   }, [isInputFocused]);
 
+  // === Ask backend if we should show QScore for this history (clears when not allowed)
   async function maybeUpdateQScore(history: { role: "user" | "assistant"; content: string }[]) {
     try {
       const res = await fetch("/api/qscore", {
@@ -332,6 +224,7 @@ export default function Home() {
         body: JSON.stringify({ userId, history }),
       });
 
+      // Treat 204 as “nothing to show”
       if (res.status === 204) {
         setQscore(null);
         localStorage.removeItem(LAST_QSCORE_KEY);
@@ -345,11 +238,12 @@ export default function Home() {
         setQscore(data.result as QScoreResult);
         localStorage.setItem(LAST_QSCORE_KEY, JSON.stringify(data.result));
       } else {
+        // IMPORTANT: clear any previously saved QScore
         setQscore(null);
         localStorage.removeItem(LAST_QSCORE_KEY);
       }
     } catch {
-      // ignore
+      // ignore network errors; leave UI as-is
     }
   }
 
@@ -396,6 +290,7 @@ export default function Home() {
       setMessages(finalUpdated);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUpdated));
 
+      // Only after assistant responds, ask /api/qscore if we should show a QScore
       const newHistory = finalUpdated.map((m) => ({ role: m.role, content: m.text }));
       await maybeUpdateQScore(newHistory);
     } catch (error: any) {
@@ -450,15 +345,6 @@ export default function Home() {
     touchStartY.current = null;
   };
 
-  const handleGoSignin = () => {
-    setAuthPromptOpen(false);
-    router.push("/signin");
-  };
-  const handleGoSignup = () => {
-    setAuthPromptOpen(false);
-    router.push("/signup");
-  };
-
   const handleLogout = async () => {
     setIsLoading(true);
     try {
@@ -479,6 +365,7 @@ export default function Home() {
     }
   };
 
+  /* ===== Voice call starter → now shows a toast ===== */
   const handleStartVoiceCall = () => {
     notify("Feature coming soon");
   };
@@ -509,7 +396,9 @@ export default function Home() {
       {/* Toast */}
       {toast.open && (
         <div role="status" aria-live="polite" className="fixed top-4 left-1/2 -translate-x-1/2 z-[80]">
-          <div className="px-4 py-2 rounded-xl bg-white/90 text-black shadow-lg border border-black/10">{toast.text}</div>
+          <div className="px-4 py-2 rounded-xl bg-white/90 text-black shadow-lg border border-black/10">
+            {toast.text}
+          </div>
         </div>
       )}
 
@@ -517,25 +406,34 @@ export default function Home() {
       <div className="hidden md:flex fixed top-3 right-3 z-[70] gap-2">
         <button
           type="button"
-          onClick={handleGoSignin}
+          onClick={handleStartVoiceCall}
           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/15 bg-white/10 backdrop-blur-md hover:bg-white/15 active:scale-95 transition"
-          title="Go to sign in"
+          title="Start voice call"
         >
-          <span className="text-sm font-semibold">Login</span>
+          {/* phone icon */}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M22 16.92v2a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 3.18 2 2 0 0 1 4.11 1h2a2 2 0 0 1 2 1.72c.13.98.36 1.94.68 2.86a2 2 0 0 1-.45 2.11L7.09 8.91a16 16 0 0 0 6 6l1.22-1.22a2 2 0 0 1 2.11-.45c.92.32 1.88.55 2.86.68A2 2 0 0 1 22 16.92Z" stroke="white" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <span className="text-sm font-semibold">Voice call</span>
         </button>
 
         <button
           type="button"
-          onClick={handleGoSignup}
+          onClick={handleLogout}
           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/15 bg-white/10 backdrop-blur-md hover:bg-white/15 active:scale-95 transition"
-          title="Go to sign up"
+          title="Log out"
         >
-          <span className="text-sm font-semibold">Sign up</span>
+          {/* power icon */}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M12 2v10" stroke="white" strokeWidth="1.8" strokeLinecap="round"/>
+            <path d="M5.5 5.5a8 8 0 1 0 13 0" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <span className="text-sm font-semibold">Log out</span>
         </button>
       </div>
 
-      {/* ===== MOBILE: FIXED TOP BAR (safe-area removed) ===== */}
-      <header className="md:hidden fixed top-0 left-0 right-0 z-[30] bg-black/60 backdrop-blur-xl border-b border-white/10 pt-2">
+      {/* ===== MOBILE: FIXED TOP BAR ===== */}
+      <header className="md:hidden fixed top-0 left-0 right-0 z-[30] bg-black/60 backdrop-blur-xl border-b border-white/10 pt-[calc(env(safe-area-inset-top))]">
         <div className="flex items-center justify-between px-3 py-3">
           <button
             type="button"
@@ -557,7 +455,7 @@ export default function Home() {
         </div>
       </header>
 
-      {/* ===== MOBILE DRAWER (safe-area removed) ===== */}
+      {/* ===== MOBILE DRAWER ===== */}
       <div
         role="dialog"
         aria-modal="true"
@@ -566,7 +464,7 @@ export default function Home() {
       >
         <div className={`absolute inset-0 bg-black/60 transition-opacity ${mobileMenuOpen ? "opacity-100" : "opacity-0"}`} />
         <nav
-          className={`absolute top-0 left-0 h-full w-[80%] max-w-[320px] bg-[#0B0B0B] border-r border-white/10 pt-3 px-4 pb-3 transform transition-transform duration-300 ${
+          className={`absolute top-0 left-0 h-full w-[80%] max-w-[320px] bg-[#0B0B0B] border-r border-white/10 pt-[calc(12px+env(safe-area-inset-top))] px-4 pb-[calc(12px+env(safe-area-inset-bottom))] transform transition-transform duration-300 ${
             mobileMenuOpen ? "translate-x-0" : "-translate-x-full"
           }`}
           onClick={(e) => e.stopPropagation()}
@@ -587,43 +485,52 @@ export default function Home() {
 
           <ul className="space-y-1">
             <li className="pt-2">
-              <button className="w-full text-left px-3 py-3 rounded-lg bg-yellow-400 text-black font-semibold hover:bg-yellow-300" onClick={handleGoSignin}>
-                Login
+              <button
+                className="w-full text-left px-3 py-3 rounded-lg bg-yellow-400 text-black font-semibold hover:bg-yellow-300"
+                onClick={handleStartVoiceCall}
+              >
+                voice call
               </button>
             </li>
           </ul>
 
           <ul className="space-y-1">
             <li className="pt-2">
-              <button className="w-full text-left px-3 py-3 rounded-lg bg-yellow-400 text-black font-semibold hover:bg-yellow-300" onClick={handleGoSignup}>
-                Sign Up
+              <button
+                className="w-full text-left px-3 py-3 rounded-lg bg-yellow-400 text-black font-semibold hover:bg-yellow-300"
+                onClick={handleLogout}
+              >
+                Log out
               </button>
             </li>
           </ul>
         </nav>
       </div>
 
-      {/* ===== MOBILE CHAT (safe-area removed) ===== */}
+      {/* ===== MOBILE CHAT ===== */}
       <section className="md:hidden fixed inset-0 z-[25]">
         {!showMobileChat ? (
           <div
-            className="absolute inset-0 pt-[72px] flex flex-col items-center justify-start gap-0 bg-transparent"
+            className="absolute inset-0 pt-[calc(72px+env(safe-area-inset-top))] flex flex-col items-center justify-start gap-0 bg-transparent"
             onTouchStart={onTouchStart}
             onTouchEnd={onTouchEnd}
           >
             <Image src="/dave2.png" alt="SPARQ" width={900} height={360} priority className="free-swinging-dave" />
-            <button onClick={() => setShowMobileChat(true)} className="mt-0 px-5 py-2 rounded-full bg-white/20 border border-white/20">
+            <button onClick={() => setShowMobileChat(true)} className="mt-0 px-5 py-2 rounded-full bg白/20 border border-white/20">
               whats on your mind?
             </button>
           </div>
         ) : (
           <div className="flex flex-col h-[100dvh] bg-transparent">
             {/* QScore header (mobile) */}
-            <div className="px-4 pt-[72px] pb-2">
+            <div className="px-4 pt-[calc(72px+env(safe-area-inset-top))] pb-2">
               <QScorePanel q={qscore} />
             </div>
 
-            <div ref={mobileMessagesRef} className="flex-1 overflow-y-auto px-4 pb-[108px] pt-2 space-y-4 overscroll-contain scroll-smooth">
+            <div
+              ref={mobileMessagesRef}
+              className="flex-1 overflow-y-auto px-4 pb-[108px] pt-2 space-y-4 overscroll-contain scroll-smooth"
+            >
               {messages.map((m) => (
                 <MessageBubble key={m.id} m={m} />
               ))}
@@ -638,7 +545,7 @@ export default function Home() {
               )}
             </div>
 
-            <div className="sticky bottom-0 left-0 right-0 z-[26] bg-black/70 backdrop-blur-md border-t border-white/10 px-3 pt-2 pb-3">
+            <div className="sticky bottom-0 left-0 right-0 z-[26] bg-black/70 backdrop-blur-md border-t border-white/10 px-3 pt-2 pb-[calc(10px+env(safe-area-inset-bottom))]">
               <div className="flex gap-2 items-end">
                 <textarea
                   ref={textareaRef}
@@ -746,60 +653,35 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ===== Auth popup modal (every 30s) ===== */}
-      <AuthPromptModal open={!!authPromptOpen} onClose={() => setAuthPromptOpen(false)} onSignin={handleGoSignin} onSignup={handleGoSignup} />
-
       {/* Keyframes & extras */}
       <style jsx global>{`
-        @keyframes hoverAnimation {
-          0% { transform: translateY(0); }
-          50% { transform: translateY(-20px); }
-          100% { transform: translateY(0); }
-        }
-        @keyframes glowAnimation {
-          0% { filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.3)); }
-          50% { filter: drop-shadow(0 0 20px rgba(255, 255, 255, 0.7)); }
-          100% { filter: drop-shadow(0 0 0 10px rgba(255, 255, 255, 0.3)); }
-        }
+        @keyframes hoverAnimation { 0% { transform: translateY(0); } 50% { transform: translateY(-20px); } 100% { transform: translateY(0); } }
+        @keyframes glowAnimation { 0% { filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.3)); } 50% { filter: drop-shadow(0 0 20px rgba(255, 255, 255, 0.7)); } 100% { filter: drop-shadow(0 0 0 10px rgba(255, 255, 255, 0.3)); } }
         @keyframes yellowGlowAnimation {
-          0% { box-shadow: 0 0 20px rgba(255, 215, 0, 0.3), 0 0 40px rgba(255, 215, 0, 0.2), inset 0 0 20px rgba(255, 215, 0, 0.1); }
-          50% { box-shadow: 0 0 40px rgba(255, 215, 0, 0.6), 0 0 80px rgba(255, 215, 0, 0.4), inset 0 0 40px rgba(255, 215, 0, 0.2); }
-          100% { box-shadow: 0 0 20px rgba(255, 215, 0, 0.3), 0 0 40px rgba(255, 215, 0, 0.2), inset 0 0 20px rgba(255, 215, 0, 0.1); }
+          0% { box-shadow: 0 0 20px rgba(255,215,0,0.3), 0 0 40px rgba(255,215,0,0.2), inset 0 0 20px rgba(255,215,0,0.1); }
+          50% { box-shadow: 0 0 40px rgba(255,215,0,0.6), 0 0 80px rgba(255,215,0,0.4), inset 0 0 40px rgba(255,215,0,0.2); }
+          100% { box-shadow: 0 0 20px rgba(255,215,0,0.3), 0 0 40px rgba(255,215,0,0.2), inset 0 0 20px rgba(255,215,0,0.1); }
         }
         .hover-animation { animation: hoverAnimation 3s ease-in-out infinite; }
         .glow-animation { animation: glowAnimation 2s ease-in-out infinite; }
         .yellow-glow-animation { animation: yellowGlowAnimation 3s ease-in-out infinite; }
 
         .ripple-container { position: absolute; width: 400px; height: 400px; display: flex; align-items: center; justify-content: center; border-radius: 50%; overflow: visible; }
-        .ripple { position: absolute; border: 4px solid rgba(255, 255, 255, 0.4); border-radius: 50%; width: 400px; height: 400px; opacity: 0; animation: rippleWave 4s ease-out infinite; }
+        .ripple { position: absolute; border: 4px solid rgba(255,255,255,0.4); border-radius: 50%; width: 400px; height: 400px; opacity: 0; animation: rippleWave 4s ease-out infinite; }
         .ripple.delay-1 { animation-delay: 1.3s; }
         .ripple.delay-2 { animation-delay: 2.6s; }
-        @keyframes rippleWave {
-          0% { transform: scale(0.5); opacity: 0.6; }
-          70% { opacity: 0.3; }
-          100% { transform: scale(2); opacity: 0; }
-        }
+        @keyframes rippleWave { 0% { transform: scale(0.5); opacity: 0.6; } 70% { opacity: 0.3; } 100% { transform: scale(2); opacity: 0; } }
 
-        @keyframes ping-slow {
-          0%, 100% { transform: scale(1); opacity: 0.3; }
-          50% { transform: scale(1.05); opacity: 0.5; }
-        }
+        @keyframes ping-slow { 0%, 100% { transform: scale(1); opacity: 0.3); } 50% { transform: scale(1.05); opacity: 0.5; } }
         .animate-ping-slow { animation: ping-slow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
 
-        @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-        .animate-fade-in { animation: fade-in 0.5s ease-out both; }
-
-        @keyframes slide-up {
-          from { transform: translateY(24px); opacity: 0; }
-          to { transform: translateY(0); opacity: 1; }
-        }
-        .animate-slide-up { animation: slide-up 0.28s ease-out both; }
+        @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+        .animate-fade-in { animation: fade-in .5s ease-out both }
+        @keyframes slide-up { from { transform: translateY(24px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
+        .animate-slide-up { animation: slide-up .28s ease-out both }
 
         .free-swinging-dave { position: relative; animation: freeSwing 3s ease-in-out infinite; transform-origin: top center; will-change: transform; }
-        @keyframes freeSwing {
-          0%, 100% { transform: rotate(-10deg); }
-          50% { transform: rotate(10deg); }
-        }
+        @keyframes freeSwing { 0%, 100% { transform: rotate(-10deg); } 50% { transform: rotate(10deg); } }
       `}</style>
     </main>
   );

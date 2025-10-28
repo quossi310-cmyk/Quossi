@@ -1,0 +1,122 @@
+{
+  "sadness": {
+    "anchor_types": ["empathy", "reassurance", "connection"],
+    "weighting": { "empathy": 0.5, "reassurance": 0.3, "connection": 0.2 },
+    "tone_directives": {
+      "pace": "slow",
+      "voice": "gentle",
+      "keywords_to_avoid": ["cheer up", "move on", "it’s okay"],
+      "response_focus": "validation and warmth"
+    }
+  },
+
+  "grief": {
+    "anchor_types": ["empathy", "connection"],
+    "weighting": { "empathy": 0.7, "connection": 0.3 },
+    "tone_directives": {
+      "pace": "slow",
+      "voice": "low and steady",
+      "response_focus": "presence, shared quiet, honoring loss"
+    }
+  },
+
+  "anxiety": {
+    "anchor_types": ["reassurance", "encouragement"],
+    "weighting": { "reassurance": 0.6, "encouragement": 0.4 },
+    "tone_directives": {
+      "pace": "steady",
+      "voice": "calm and clear",
+      "response_focus": "safety, breathing, grounding in the present"
+    }
+  },
+
+  "guilt": {
+    "anchor_types": ["empathy", "reassurance"],
+    "weighting": { "empathy": 0.4, "reassurance": 0.6 },
+    "tone_directives": {
+      "pace": "moderate",
+      "voice": "warm and forgiving",
+      "response_focus": "self-compassion, reframing, gentle acceptance"
+    }
+  },
+
+  "anger": {
+    "anchor_types": ["empathy", "connection", "encouragement"],
+    "weighting": { "empathy": 0.4, "connection": 0.4, "encouragement": 0.2 },
+    "tone_directives": {
+      "pace": "measured",
+      "voice": "grounded and strong",
+      "response_focus": "containment, validation, and redirection"
+    }
+  },
+
+  "shame": {
+    "anchor_types": ["empathy", "reassurance", "connection"],
+    "weighting": { "empathy": 0.5, "reassurance": 0.3, "connection": 0.2 },
+    "tone_directives": {
+      "pace": "slow",
+      "voice": "safe and accepting",
+      "response_focus": "belonging, worthiness, emotional safety"
+    }
+  },
+
+  "hopelessness": {
+    "anchor_types": ["connection", "reassurance", "encouragement"],
+    "weighting": { "connection": 0.5, "reassurance": 0.3, "encouragement": 0.2 },
+    "tone_directives": {
+      "pace": "slow and gentle",
+      "voice": "warm and persistent",
+      "response_focus": "stability, gentle forward movement, staying present"
+    }
+  },
+
+  "fear": {
+    "anchor_types": ["reassurance", "empathy"],
+    "weighting": { "reassurance": 0.6, "empathy": 0.4 },
+    "tone_directives": {
+      "pace": "steady and soft",
+      "voice": "soothing",
+      "response_focus": "safety, grounding, containment"
+    }
+  },
+
+  "loneliness": {
+    "anchor_types": ["connection", "empathy"],
+    "weighting": { "connection": 0.6, "empathy": 0.4 },
+    "tone_directives": {
+      "pace": "unhurried",
+      "voice": "warm and present",
+      "response_focus": "companionship, belonging, safety"
+    }
+  },
+
+  "confusion": {
+    "anchor_types": ["reassurance", "encouragement"],
+    "weighting": { "reassurance": 0.5, "encouragement": 0.5 },
+    "tone_directives": {
+      "pace": "steady",
+      "voice": "clear and patient",
+      "response_focus": "clarity, guidance, emotional grounding"
+    }
+  },
+
+  "neutral": {
+    "anchor_types": ["encouragement", "connection"],
+    "weighting": { "encouragement": 0.6, "connection": 0.4 },
+    "tone_directives": {
+      "pace": "natural",
+      "voice": "light and steady",
+      "response_focus": "balance, stability, gentle motivation"
+    }
+  },
+
+  "gratitude": {
+    "anchor_types": ["connection", "encouragement"],
+    "weighting": { "connection": 0.5, "encouragement": 0.5 },
+    "tone_directives": {
+      "pace": "natural",
+      "voice": "warm and genuine",
+      "response_focus": "reinforcing positive emotion and presence"
+    }
+  }
+}
