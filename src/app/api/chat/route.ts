@@ -2,51 +2,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { SYSTEM_PROMPT } from "@/app/lib/systemPrompt";
+import {
+  corsHeaders,
+  handleOptions,
+  isOriginAllowed,
+} from "@/app/lib/cors";
 
 export const runtime = "nodejs";
-
-/* ================= CORS (Capacitor + Android emulator) ================= */
-const ALLOWED_ORIGINS = [
-  "http://localhost:3000",     // dev web
-  "http://10.0.2.2:3000",      // Android emulator reaching your machine
-  "capacitor://localhost",     // Capacitor WebView scheme
-  "https://yourdomain.com",    // prod domain (replace/extend as needed)
-];
-
-// Build CORS headers dynamically so we echo the exact Origin (or allow none).
-function buildCorsHeaders(origin: string | null) {
-  // Some WebViews (Capacitor) send no Origin at all; allow in dev.
-  const allowAny = !origin || origin.length === 0;
-
-  // Strict allow if present; otherwise allow empty (native/webview).
-  const isAllowed =
-    allowAny || ALLOWED_ORIGINS.some((o) => origin!.startsWith(o));
-
-  // If you prefer strict blocking, set Access-Control-Allow-Origin to a matched origin only.
-  const allowOrigin = allowAny
-    ? "*"
-    : isAllowed
-    ? origin!
-    : "null";
-
-  return {
-    "Access-Control-Allow-Origin": allowOrigin,
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers":
-      "Content-Type, Authorization, X-CSRF-Token",
-    "Access-Control-Max-Age": "86400",
-    Vary: "Origin",
-  } as Record<string, string>;
-}
-
-// Preflight for browsers/webviews
-export async function OPTIONS(req: NextRequest) {
-  const headers = buildCorsHeaders(req.headers.get("origin"));
-  return new NextResponse(null, { status: 204, headers });
-}
+// Keep this if you want to guarantee SSR for this route
+export const dynamic = "force-dynamic";
 
 /* ================= In-memory persistence (dev-friendly) ================= */
-type StoredMsg = { role: "user" | "assistant"; content: string; ts: number };
+type ChatRole = "user" | "assistant";
+type StoredMsg = { role: ChatRole; content: string; ts: number };
+
 const conversations = new Map<string, StoredMsg[]>();
 
 function getConversation(userId?: string): StoredMsg[] {
@@ -73,21 +42,38 @@ function throttle(ip: string, limit = 20, windowMs = 60_000) {
   return rec.count <= limit;
 }
 
-export async function GET(req: NextRequest) {
-  const headers = buildCorsHeaders(req.headers.get("origin"));
-  // Health check: do NOT call OpenAI here
-  return NextResponse.json({ ok: true, message: "health" }, { headers });
+/* ================= Small helpers ================= */
+function safeJson<T = unknown>(raw: string): T | null {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
 }
 
+/* ================= CORS preflight ================= */
+export async function OPTIONS(req: NextRequest) {
+  return handleOptions(req);
+}
+
+/* ================= Health (no OpenAI) ================= */
+export async function GET(req: NextRequest) {
+  const origin = req.headers.get("origin");
+  return NextResponse.json(
+    { ok: true, message: "health" },
+    { headers: corsHeaders(origin) }
+  );
+}
+
+/* ================= Main chat ================= */
 export async function POST(req: NextRequest) {
   const origin = req.headers.get("origin");
-  const headers = buildCorsHeaders(origin);
 
-  // If an Origin is present but not allowed, block (empty Origin is allowed for native apps/webviews)
-  if (origin && !ALLOWED_ORIGINS.some((o) => origin.startsWith(o))) {
+  // Gate by allowed origins (null/absent origin is allowed by lib/cors for native/webviews)
+  if (!isOriginAllowed(origin, req)) {
     return NextResponse.json(
       { error: "Origin not allowed" },
-      { status: 403, headers }
+      { status: 403, headers: corsHeaders(origin) }
     );
   }
 
@@ -101,41 +87,37 @@ export async function POST(req: NextRequest) {
   if (!throttle(String(ip))) {
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers }
+      { status: 429, headers: corsHeaders(origin) }
     );
-    }
+  }
 
   if (!process.env.OPENAI_API_KEY) {
     return NextResponse.json(
       { error: "Missing OPENAI_API_KEY" },
-      { status: 500, headers }
+      { status: 500, headers: corsHeaders(origin) }
     );
   }
 
-  // Parse payload
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
+  // Parse payload safely
+  const raw = await req.text();
+  const body = safeJson<{ message?: string; history?: unknown; userId?: string }>(raw);
+  if (!body) {
     return NextResponse.json(
       { error: "Invalid JSON" },
-      { status: 400, headers }
+      { status: 400, headers: corsHeaders(origin) }
     );
   }
 
-  const { message, history = [], userId } = body ?? {};
+  const { message, history = [], userId } = body;
   if (!message || typeof message !== "string" || !message.trim()) {
     return NextResponse.json(
       { error: "Missing message" },
-      { status: 400, headers }
+      { status: 400, headers: corsHeaders(origin) }
     );
   }
 
   // Merge conversation history
-  let serverHistory: StoredMsg[] = [];
-  if (userId) {
-    serverHistory = getConversation(userId);
-  }
+  const serverHistory = userId ? getConversation(userId) : [];
 
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -145,7 +127,12 @@ export async function POST(req: NextRequest) {
   }> = [
     { role: "system", content: SYSTEM_PROMPT },
     ...serverHistory,
-    ...(Array.isArray(history) ? history : []),
+    ...(Array.isArray(history) ? (history as any[]).filter(Boolean).map((h) => {
+      const role: "user" | "assistant" =
+        h?.role === "assistant" ? "assistant" : "user";
+      const content = typeof h?.content === "string" ? h.content : "";
+      return { role, content };
+    }) : []),
     { role: "user", content: message.trim() },
   ];
 
@@ -159,12 +146,16 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    // You were using the Responses API; keep that
     const response = await client.responses.create({
       model: process.env.OPENAI_MODEL || "gpt-4o-mini",
       input: openaiMessages,
+      temperature: 0.6,
+      max_output_tokens: 500,
+      // user: userId,  // uncomment if you want per-user tagging
     });
 
-    const text = response.output_text ?? "No response";
+    const text = (response as any).output_text ?? "No response";
 
     // Persist assistant reply
     if (userId) {
@@ -180,13 +171,14 @@ export async function POST(req: NextRequest) {
         response: text,
         meta: { intent: "general" },
       },
-      { headers }
+      { headers: corsHeaders(origin) }
     );
-  } catch (e: any) {
-    const code = e?.status ?? 500;
+  } catch (e: unknown) {
+    const code = (e as any)?.status ?? 500;
+    const msg = (e as Error)?.message ?? "OpenAI request failed";
     return NextResponse.json(
-      { error: "OpenAI request failed", code, details: e?.message },
-      { status: code, headers }
+      { error: "OpenAI request failed", code, details: msg },
+      { status: code, headers: corsHeaders(origin) }
     );
   }
 }
