@@ -1,6 +1,7 @@
+// app/signup/page.tsx
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import React, { Suspense, useState, useEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import Image from "next/image";
@@ -21,7 +22,17 @@ function scorePassword(pw: string) {
   return Math.min(s, 4); // 0..4
 }
 
+/** Page-level component: provides Suspense boundary required for useSearchParams */
 export default function SignUpPage() {
+  return (
+    <Suspense fallback={<div />}>
+      <SignUpInner />
+    </Suspense>
+  );
+}
+
+/** Inner component does the actual work (safe to use useSearchParams here) */
+function SignUpInner() {
   const router = useRouter();
   const qs = useSearchParams();
 
@@ -33,7 +44,7 @@ export default function SignUpPage() {
 
   // form state
   const [name, setName] = useState("");
-  const [email, setEmail] = useState(qs.get("email") ?? "");
+  const [email, setEmail] = useState<string>(qs.get("email") ?? "");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [loading, setLoading] = useState(false);
@@ -51,10 +62,9 @@ export default function SignUpPage() {
       const { data, error } = await supabase.auth.getUser();
       if (!error && data.user) router.replace("/dashboard");
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [supabase]);
+  }, [router, supabase]);
 
-  async function handleEmailPassword(e: React.FormEvent) {
+  async function handleEmailPassword(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!supabase || !canSubmit) return;
 
@@ -80,14 +90,15 @@ export default function SignUpPage() {
         setMsg("Account created! Redirecting…");
         router.replace("/dashboard");
       }
-    } catch (e: any) {
-      setErr(e?.message ?? "Sign up failed.");
+    } catch (e: unknown) {
+      const m = e instanceof Error ? e.message : "Sign up failed.";
+      setErr(m);
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleMagicLink(e: React.FormEvent) {
+  async function handleMagicLink(e: React.MouseEvent<HTMLButtonElement>) {
     e.preventDefault();
     if (!supabase || !email) return;
 
@@ -103,8 +114,9 @@ export default function SignUpPage() {
 
       if (error) throw error;
       setMsg("Magic link sent. Check your email.");
-    } catch (e: any) {
-      setErr(e?.message ?? "Could not send magic link.");
+    } catch (e: unknown) {
+      const m = e instanceof Error ? e.message : "Could not send magic link.";
+      setErr(m);
     } finally {
       setLoading(false);
     }
@@ -216,9 +228,10 @@ export default function SignUpPage() {
             </button>
 
             <button
+              type="button"
               onClick={handleMagicLink}
               disabled={loading || !email || !envOK}
-              className="px-8 py-3 font-semibold rounded-full border border-white/30 bg-white/10 hover:bg白/20 transition-all duration-300 disabled:opacity-60"
+              className="px-8 py-3 font-semibold rounded-full border border-white/30 bg-white/10 hover:bg-white/20 transition-all duration-300 disabled:opacity-60"
             >
               Send me a magic link
             </button>
