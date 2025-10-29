@@ -1,10 +1,16 @@
-// pages/index.tsx (updated with toast for voice call)
+// pages/index.tsx (TypeScript-safe, Netlify-friendly)
 "use client";
 
 import Image from "next/image";
-import { useState, KeyboardEvent, useEffect, useRef } from "react";
+import React, {
+  useState,
+  useEffect,
+  useRef,
+  KeyboardEvent,
+  MutableRefObject,
+} from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 /* ================= QSCORE TYPES ================= */
 type Tone = "positive" | "neutral" | "stressed";
@@ -28,22 +34,26 @@ const LAST_QSCORE_KEY = "quossi_last_qscore";
 /* ================= UTIL: LOCAL UID ================= */
 function getOrCreateUserId(): string {
   if (typeof window === "undefined") return "local-user";
-  let uid = localStorage.getItem(UID_KEY);
-  if (!uid) {
-    uid = `u_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
-    localStorage.setItem(UID_KEY, uid);
+  try {
+    let uid = localStorage.getItem(UID_KEY);
+    if (!uid) {
+      uid = `u_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+      localStorage.setItem(UID_KEY, uid);
+    }
+    return uid;
+  } catch {
+    return "local-user";
   }
-  return uid;
 }
 
-/* ================= SUPABASE (still optional in no-auth) ================= */
-const supabase =
+/* ================= SUPABASE (optional) ================= */
+const supabase: SupabaseClient | null =
   typeof window !== "undefined"
     ? createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL || "http://localhost",
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "public-anon-key"
+        process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://localhost",
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "public-anon-key"
       )
-    : (null as any);
+    : null;
 
 /* ================= SMALL UI PARTS ================= */
 function MessageBubble({ m }: { m: Message }) {
@@ -82,9 +92,11 @@ function QScorePanel({ q }: { q: QScoreResult | null }) {
   if (!q) return null;
 
   const toneColor =
-    q.tone === "positive" ? "bg-emerald-500/20 text-emerald-200 border-emerald-500/40" :
-    q.tone === "stressed" ? "bg-rose-500/20 text-rose-200 border-rose-500/40" :
-    "bg-slate-500/20 text-slate-200 border-slate-500/40";
+    q.tone === "positive"
+      ? "bg-emerald-500/20 text-emerald-200 border-emerald-500/40"
+      : q.tone === "stressed"
+      ? "bg-rose-500/20 text-rose-200 border-rose-500/40"
+      : "bg-slate-500/20 text-slate-200 border-slate-500/40";
 
   return (
     <div className="animate-slide-up">
@@ -104,9 +116,7 @@ function QScorePanel({ q }: { q: QScoreResult | null }) {
         <div className="mt-2 p-3 rounded-lg border border-white/10 bg-white/5">
           <div className="text-xs uppercase tracking-wide text-white/60 mb-1">Suggested Task</div>
           <div className="text-sm text-white/90">{q.task}</div>
-          <div className="mt-1 text-[11px] text-white/50">
-            Generated: {new Date(q.runAt).toLocaleString()}
-          </div>
+          <div className="mt-1 text-[11px] text-white/50">Generated: {new Date(q.runAt).toLocaleString()}</div>
         </div>
       )}
     </div>
@@ -119,24 +129,32 @@ export default function Home() {
   const userId = getOrCreateUserId();
 
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState("");
-  const [isInputFocused, setIsInputFocused] = useState(() => {
-    const stored = typeof window !== "undefined" ? localStorage.getItem(OPEN_STATE_KEY) : null;
+  const [input, setInput] = useState<string>("");
+  const [isInputFocused, setIsInputFocused] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const stored = localStorage.getItem(OPEN_STATE_KEY);
     return stored === "true";
   });
-  const [isLoading, setIsLoading] = useState(false);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [showMobileChat, setShowMobileChat] = useState(false);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
+  const [showMobileChat, setShowMobileChat] = useState<boolean>(false);
 
   // QScore state (only shown when backend "allows")
   const [qscore, setQscore] = useState<QScoreResult | null>(null);
 
   // ===== Toast state + helper =====
   const [toast, setToast] = useState<{ open: boolean; text: string }>({ open: false, text: "" });
+  const toastTimeoutRef = useRef<number | null>(null);
+
   function notify(msg: string, ms = 2200) {
     setToast({ open: true, text: msg });
-    window.clearTimeout((notify as any)._t);
-    (notify as any)._t = window.setTimeout(() => setToast((t: any) => ({ ...t, open: false })), ms);
+    if (toastTimeoutRef.current) {
+      window.clearTimeout(toastTimeoutRef.current);
+    }
+    toastTimeoutRef.current = window.setTimeout(() => {
+      setToast((t) => ({ ...t, open: false }));
+      toastTimeoutRef.current = null;
+    }, ms);
   }
 
   useEffect(() => {
@@ -146,37 +164,47 @@ export default function Home() {
     }
   }, []);
 
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const interfaceRef = useRef<HTMLDivElement>(null);
-  const deskMessagesRef = useRef<HTMLDivElement>(null);
-  const mobileMessagesRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const interfaceRef = useRef<HTMLDivElement | null>(null);
+  const deskMessagesRef = useRef<HTMLDivElement | null>(null);
+  const mobileMessagesRef = useRef<HTMLDivElement | null>(null);
 
   // run-once guard for initial QScore validation
-  const hasValidatedOnceRef = useRef(false);
+  const hasValidatedOnceRef = useRef<boolean>(false);
 
   const jumpToBottom = (el: HTMLDivElement | null, smooth = false) => {
     if (!el) return;
-    if (smooth) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    else el.scrollTop = el.scrollHeight;
+    if (smooth) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
   };
 
   // Load chat only (<=7 days old). DO NOT auto-load qscore from localStorage.
   useEffect(() => {
     const load = () => {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed: Message[] = JSON.parse(stored);
-        const now = Date.now();
-        const filtered = parsed.filter((m) => now - m.timestamp < SEVEN_DAYS_MS);
-        const migrated = filtered.map((m) => ({ ...m, role: (m.role || "user") as const }));
-        setMessages(migrated);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+      try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored) as Message[];
+          const now = Date.now();
+          const filtered = parsed.filter((m) => now - m.timestamp < SEVEN_DAYS_MS);
+          const migrated: Message[] = filtered.map((m) => ({
+            ...m,
+            role: m.role === "assistant" ? "assistant" : "user",
+          }));
+          setMessages(migrated);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+        }
+      } catch {
+        // ignore JSON errors
       }
     };
     load();
-    const id = setInterval(load, 60 * 60 * 1000);
-    return () => clearInterval(id);
+    const id = window.setInterval(load, 60 * 60 * 1000);
+    return () => window.clearInterval(id);
   }, []);
 
   // After first load, validate once with backend. If not allowed, ensure QScore is hidden.
@@ -184,21 +212,26 @@ export default function Home() {
     if (hasValidatedOnceRef.current) return;
     hasValidatedOnceRef.current = true;
 
-    const t = setTimeout(() => {
+    const t = window.setTimeout(() => {
       const history = messages.map((m) => ({ role: m.role, content: m.text }));
       if (history.length) {
-        maybeUpdateQScore(history);
+        void maybeUpdateQScore(history);
       } else {
         setQscore(null);
-        localStorage.removeItem(LAST_QSCORE_KEY);
+        try {
+          localStorage.removeItem(LAST_QSCORE_KEY);
+        } catch {}
       }
     }, 0);
-    return () => clearTimeout(t);
+    return () => window.clearTimeout(t);
+    // We explicitly only care about running once after initial message load
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length]);
 
   useEffect(() => {
-    localStorage.setItem(OPEN_STATE_KEY, String(isInputFocused));
+    try {
+      localStorage.setItem(OPEN_STATE_KEY, String(isInputFocused));
+    } catch {}
   }, [isInputFocused]);
 
   useEffect(() => {
@@ -208,10 +241,10 @@ export default function Home() {
 
   useEffect(() => {
     if (isInputFocused) {
-      const id = requestAnimationFrame(() => {
+      const id = window.requestAnimationFrame(() => {
         jumpToBottom(deskMessagesRef.current, false);
       });
-      return () => cancelAnimationFrame(id);
+      return () => window.cancelAnimationFrame(id);
     }
   }, [isInputFocused]);
 
@@ -227,20 +260,28 @@ export default function Home() {
       // Treat 204 as “nothing to show”
       if (res.status === 204) {
         setQscore(null);
-        localStorage.removeItem(LAST_QSCORE_KEY);
+        try {
+          localStorage.removeItem(LAST_QSCORE_KEY);
+        } catch {}
         return;
       }
 
       if (!res.ok) return;
-      const data = await res.json();
+      const data = (await res.json()) as {
+        allowed?: boolean;
+        result?: QScoreResult;
+      };
 
       if (data?.allowed && data?.result) {
-        setQscore(data.result as QScoreResult);
-        localStorage.setItem(LAST_QSCORE_KEY, JSON.stringify(data.result));
+        setQscore(data.result);
+        try {
+          localStorage.setItem(LAST_QSCORE_KEY, JSON.stringify(data.result));
+        } catch {}
       } else {
-        // IMPORTANT: clear any previously saved QScore
         setQscore(null);
-        localStorage.removeItem(LAST_QSCORE_KEY);
+        try {
+          localStorage.removeItem(LAST_QSCORE_KEY);
+        } catch {}
       }
     } catch {
       // ignore network errors; leave UI as-is
@@ -250,16 +291,19 @@ export default function Home() {
   const handleSendMessage = async () => {
     if (!input.trim() || isLoading) return;
 
+    const now = Date.now();
     const userText = input.trim();
     const userMsg: Message = {
       text: userText,
-      id: Date.now(),
-      timestamp: Date.now(),
+      id: now,
+      timestamp: now,
       role: "user",
     };
     const updated = [...messages, userMsg];
     setMessages(updated);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    } catch {}
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
@@ -275,34 +319,45 @@ export default function Home() {
       });
 
       if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        throw new Error(errorData?.error || "API error");
+        let errMessage = "API error";
+        try {
+          const errorData = (await res.json()) as { error?: string };
+          if (errorData?.error) errMessage = errorData.error;
+        } catch {
+          /* ignore */
+        }
+        throw new Error(errMessage);
       }
 
-      const { response } = await res.json();
+      const data = (await res.json()) as { response: string };
       const assistantMsg: Message = {
-        text: response,
-        id: Date.now() + 1,
+        text: data.response,
+        id: now + 1,
         timestamp: Date.now(),
         role: "assistant",
       };
       finalUpdated = [...updated, assistantMsg];
       setMessages(finalUpdated);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUpdated));
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUpdated));
+      } catch {}
 
       // Only after assistant responds, ask /api/qscore if we should show a QScore
       const newHistory = finalUpdated.map((m) => ({ role: m.role, content: m.text }));
       await maybeUpdateQScore(newHistory);
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : "Could not get response.";
       const errorMsg: Message = {
-        text: `Error: ${error.message || "Could not get response."}`,
-        id: Date.now() + 1,
+        text: `Error: ${msg}`,
+        id: now + 1,
         timestamp: Date.now(),
         role: "assistant",
       };
       finalUpdated = [...updated, errorMsg];
       setMessages(finalUpdated);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUpdated));
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUpdated));
+      } catch {}
     } finally {
       setIsLoading(false);
     }
@@ -311,12 +366,13 @@ export default function Home() {
   const handleKeyPress = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSendMessage();
+      void handleSendMessage();
     }
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(e.target.value);
+    const val = e.target.value;
+    setInput(val);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
       textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
@@ -335,10 +391,10 @@ export default function Home() {
   };
 
   const touchStartY = useRef<number | null>(null);
-  const onTouchStart = (e: React.TouchEvent) => {
+  const onTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
     touchStartY.current = e.touches[0].clientY;
   };
-  const onTouchEnd = (e: React.TouchEvent) => {
+  const onTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
     if (touchStartY.current == null) return;
     const delta = touchStartY.current - e.changedTouches[0].clientY;
     if (delta > 40) setShowMobileChat(true);
@@ -410,7 +466,6 @@ export default function Home() {
           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/15 bg-white/10 backdrop-blur-md hover:bg-white/15 active:scale-95 transition"
           title="Start voice call"
         >
-          {/* phone icon */}
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M22 16.92v2a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 3.18 2 2 0 0 1 4.11 1h2a2 2 0 0 1 2 1.72c.13.98.36 1.94.68 2.86a2 2 0 0 1-.45 2.11L7.09 8.91a16 16 0 0 0 6 6l1.22-1.22a2 2 0 0 1 2.11-.45c.92.32 1.88.55 2.86.68A2 2 0 0 1 22 16.92Z" stroke="white" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -423,7 +478,6 @@ export default function Home() {
           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/15 bg-white/10 backdrop-blur-md hover:bg-white/15 active:scale-95 transition"
           title="Log out"
         >
-          {/* power icon */}
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M12 2v10" stroke="white" strokeWidth="1.8" strokeLinecap="round"/>
             <path d="M5.5 5.5a8 8 0 1 0 13 0" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
@@ -516,7 +570,10 @@ export default function Home() {
             onTouchEnd={onTouchEnd}
           >
             <Image src="/dave2.png" alt="SPARQ" width={900} height={360} priority className="free-swinging-dave" />
-            <button onClick={() => setShowMobileChat(true)} className="mt-0 px-5 py-2 rounded-full bg白/20 border border-white/20">
+            <button
+              onClick={() => setShowMobileChat(true)}
+              className="mt-0 px-5 py-2 rounded-full bg-white/20 border border-white/20"
+            >
               whats on your mind?
             </button>
           </div>
@@ -540,7 +597,9 @@ export default function Home() {
                   <div className="flex-shrink-0 w-8 h-8 rounded-full overflow-hidden mr-2 border border-white/30">
                     <Image src="/send.png" alt="Quossi AI" width={32} height={32} className="object-cover" />
                   </div>
-                  <div className="bg-yellow-400/90 text-black p-3 rounded-lg max-w-xs border border-black/20 shadow-lg">typing</div>
+                  <div className="bg-yellow-400/90 text-black p-3 rounded-lg max-w-xs border border-black/20 shadow-lg">
+                    typing
+                  </div>
                 </div>
               )}
             </div>
@@ -564,8 +623,10 @@ export default function Home() {
                   disabled={!input.trim() || isLoading}
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={handleSendMessage}
-                  className={`grid place-items-center rounded-xl border border-blue-300/20 transition w-12 h-18 ${
-                    input.trim() && !isLoading ? "bg-blue-500/60 hover:bg-blue-500/70 active:bg-blue-500/80" : "bg-white/10 opacity-60 cursor-pointer"
+                  className={`grid place-items-center rounded-xl border border-blue-300/20 transition w-12 h-12 ${
+                    input.trim() && !isLoading
+                      ? "bg-blue-500/60 hover:bg-blue-500/70 active:bg-blue-500/80"
+                      : "bg-white/10 opacity-60 cursor-not-allowed"
                   }`}
                 >
                   <Image src="/send.png" alt="Send" width={22} height={22} />
@@ -617,7 +678,9 @@ export default function Home() {
                 <div className="flex-shrink-0 w-8 h-8 rounded-full overflow-hidden mr-2 border border-white/30">
                   <Image src="/send.png" alt="Quossi AI" width={32} height={32} className="object-cover" />
                 </div>
-                <div className="bg-yellow-400/90 text-black p-3 rounded-lg max-w-xs border border-black/20 shadow-lg">typing</div>
+                <div className="bg-yellow-400/90 text-black p-3 rounded-lg max-w-xs border border-black/20 shadow-lg">
+                  typing
+                </div>
               </div>
             )}
           </div>
@@ -642,7 +705,9 @@ export default function Home() {
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={handleSendMessage}
                 className={`group relative grid place-items-center rounded-lg mb-1 border border-blue-300/20 backdrop-blur-sm transition w-11 h-11 ${
-                  input.trim() && !isLoading ? "bg-blue-500/30 hover:bg-blue-500/40 active:bg-blue-500/50" : "bg-white/10 opacity-60 cursor-not-allowed"
+                  input.trim() && !isLoading
+                    ? "bg-blue-500/30 hover:bg-blue-500/40 active:bg-blue-500/50"
+                    : "bg-white/10 opacity-60 cursor-not-allowed"
                 }`}
               >
                 <Image src="/send.png" alt="Send" width={45} height={45} className="select-none" />
@@ -655,8 +720,16 @@ export default function Home() {
 
       {/* Keyframes & extras */}
       <style jsx global>{`
-        @keyframes hoverAnimation { 0% { transform: translateY(0); } 50% { transform: translateY(-20px); } 100% { transform: translateY(0); } }
-        @keyframes glowAnimation { 0% { filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.3)); } 50% { filter: drop-shadow(0 0 20px rgba(255, 255, 255, 0.7)); } 100% { filter: drop-shadow(0 0 0 10px rgba(255, 255, 255, 0.3)); } }
+        @keyframes hoverAnimation {
+          0% { transform: translateY(0); }
+          50% { transform: translateY(-20px); }
+          100% { transform: translateY(0); }
+        }
+        @keyframes glowAnimation {
+          0% { filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.3)); }
+          50% { filter: drop-shadow(0 0 20px rgba(255, 255, 255, 0.7)); }
+          100% { filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.3)); }
+        }
         @keyframes yellowGlowAnimation {
           0% { box-shadow: 0 0 20px rgba(255,215,0,0.3), 0 0 40px rgba(255,215,0,0.2), inset 0 0 20px rgba(255,215,0,0.1); }
           50% { box-shadow: 0 0 40px rgba(255,215,0,0.6), 0 0 80px rgba(255,215,0,0.4), inset 0 0 40px rgba(255,215,0,0.2); }
@@ -670,9 +743,16 @@ export default function Home() {
         .ripple { position: absolute; border: 4px solid rgba(255,255,255,0.4); border-radius: 50%; width: 400px; height: 400px; opacity: 0; animation: rippleWave 4s ease-out infinite; }
         .ripple.delay-1 { animation-delay: 1.3s; }
         .ripple.delay-2 { animation-delay: 2.6s; }
-        @keyframes rippleWave { 0% { transform: scale(0.5); opacity: 0.6; } 70% { opacity: 0.3; } 100% { transform: scale(2); opacity: 0; } }
+        @keyframes rippleWave {
+          0% { transform: scale(0.5); opacity: 0.6; }
+          70% { opacity: 0.3; }
+          100% { transform: scale(2); opacity: 0; }
+        }
 
-        @keyframes ping-slow { 0%, 100% { transform: scale(1); opacity: 0.3); } 50% { transform: scale(1.05); opacity: 0.5; } }
+        @keyframes ping-slow {
+          0%, 100% { transform: scale(1); opacity: 0.3; }
+          50% { transform: scale(1.05); opacity: 0.5; }
+        }
         .animate-ping-slow { animation: ping-slow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
 
         @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
