@@ -7,10 +7,9 @@ import React, {
   useEffect,
   useRef,
   KeyboardEvent,
-  MutableRefObject,
 } from "react";
 import { useRouter } from "next/navigation";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 /* ================= QSCORE TYPES ================= */
 type Tone = "positive" | "neutral" | "stressed";
@@ -30,6 +29,7 @@ const STORAGE_KEY = "chat_messages";
 const OPEN_STATE_KEY = "chat_interface_open";
 const UID_KEY = "quossi_user_id";
 const LAST_QSCORE_KEY = "quossi_last_qscore";
+const DOCK_DELAY_MS = 400;
 
 /* ================= UTIL: LOCAL UID ================= */
 function getOrCreateUserId(): string {
@@ -132,11 +132,21 @@ export default function Home() {
   const [input, setInput] = useState<string>("");
   const [isInputFocused, setIsInputFocused] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
-    const stored = localStorage.getItem(OPEN_STATE_KEY);
-    return stored === "true";
+    try {
+      const stored = localStorage.getItem(OPEN_STATE_KEY);
+      return stored === "true";
+    } catch {
+      return false;
+    }
   });
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
+
+  // Desktop reveal/docking state (these were referenced but not defined before)
+  const [activated, setActivated] = useState<boolean>(false);
+  const [docked, setDocked] = useState<boolean>(false);
+
+  // IMPORTANT: Start closed on mobile; open only after tapping the button
   const [showMobileChat, setShowMobileChat] = useState<boolean>(false);
 
   // QScore state (only shown when backend "allows")
@@ -157,14 +167,27 @@ export default function Home() {
     }, ms);
   }
 
+  // -------- MOBILE INTRO BEHAVIOR --------
+  // Lock background scroll while intro is visible
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const isMobile = window.matchMedia("(max-width: 767px)").matches;
-      if (isMobile) setShowMobileChat(true);
+    if (!showMobileChat) {
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      return () => {
+        document.body.style.overflow = prev;
+      };
     }
-  }, []);
+  }, [showMobileChat]);
 
+  // Auto-focus textarea when chat opens
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    if (showMobileChat) {
+      const id = window.setTimeout(() => textareaRef.current?.focus(), 120);
+      return () => window.clearTimeout(id);
+    }
+  }, [showMobileChat]);
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const interfaceRef = useRef<HTMLDivElement | null>(null);
   const deskMessagesRef = useRef<HTMLDivElement | null>(null);
@@ -224,7 +247,6 @@ export default function Home() {
       }
     }, 0);
     return () => window.clearTimeout(t);
-    // We explicitly only care about running once after initial message load
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length]);
 
@@ -390,17 +412,6 @@ export default function Home() {
     setIsInputFocused(false);
   };
 
-  const touchStartY = useRef<number | null>(null);
-  const onTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
-    touchStartY.current = e.touches[0].clientY;
-  };
-  const onTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
-    if (touchStartY.current == null) return;
-    const delta = touchStartY.current - e.changedTouches[0].clientY;
-    if (delta > 40) setShowMobileChat(true);
-    touchStartY.current = null;
-  };
-
   const handleLogout = async () => {
     setIsLoading(true);
     try {
@@ -564,15 +575,19 @@ export default function Home() {
       {/* ===== MOBILE CHAT ===== */}
       <section className="md:hidden fixed inset-0 z-[25]">
         {!showMobileChat ? (
-          <div
-            className="absolute inset-0 pt-[calc(72px+env(safe-area-inset-top))] flex flex-col items-center justify-start gap-0 bg-transparent"
-            onTouchStart={onTouchStart}
-            onTouchEnd={onTouchEnd}
-          >
-            <Image src="/dave2.png" alt="SPARQ" width={900} height={360} priority className="free-swinging-dave" />
+          // INTRO stays until the button is tapped (no swipe open)
+          <div className="fixed inset-0 min-h-[100dvh] bg-transparent flex flex-col items-center justify-start gap-2 pt-[calc(72px+env(safe-area-inset-top))]">
+            <Image
+              src="/dave2.png"
+              alt="quossi"
+              width={900}
+              height={360}
+              priority
+              className="free-swinging-dave pointer-events-none select-none"
+            />
             <button
               onClick={() => setShowMobileChat(true)}
-              className="mt-0 px-5 py-2 rounded-full bg-white/20 border border-white/20"
+              className="mt-0 px-5 py-2 rounded-full bg-white/20 border border-white/20 backdrop-blur-md active:scale-95 transition"
             >
               whats on your mind?
             </button>
@@ -641,80 +656,141 @@ export default function Home() {
       <section
         ref={interfaceRef}
         className={`hidden md:block fixed left-1/2 z-[50] w-full max-w-2xl -translate-x-1/2 px-4 transition-[top,bottom,transform] duration-300 ease-out ${
-          isInputFocused ? "bottom-6 top-auto translate-y-0" : "top-1/2 -translate-y-1/2"
+          activated
+            ? (docked ? "bottom-6 top-auto translate-y-0" : "top-0 bottom-0 translate-y-0")
+            : "top-1/2 -translate-y-1/2"
         }`}
       >
         <div
-          className={`relative flex flex-col w-full overflow-hidden rounded-2xl bg-transparent backdrop-blur-0 border border-white/10 shadow-lg transition-[max-height,opacity,box-shadow] duration-300 ease-out ${
-            isInputFocused ? "opacity-100 yellow-glow-animation" : "opacity-95"
-          }`}
-          onClick={() => setIsInputFocused(true)}
-          style={{ maxHeight: isInputFocused ? "80vh" : "8rem" }}
+          className={`relative flex flex-col w-full overflow-hidden rounded-2xl bg-transparent backdrop-blur-0 border border-white/10 shadow-lg transition-[opacity,box-shadow,height,max-height] duration-300 ease-out ${
+            (isInputFocused || activated) ? "opacity-100 yellow-glow-animation" : "opacity-95"
+          } ${activated ? (docked ? "h-[85vh] max-h-[85vh]" : "h-[100vh] max-h-[100vh]") : ""}`}
+          onClick={() => {
+            if (!activated) {
+              setActivated(true);
+              setIsInputFocused(true);
+              setTimeout(() => textareaRef.current?.focus(), 0);
+              // stay full-height briefly, then dock to bottom
+              window.setTimeout(() => setDocked(true), DOCK_DELAY_MS);
+            }
+          }}
         >
+          {/* soft background pulse */}
           <div className="absolute inset-0 rounded-2xl bg-gradient-to-r from-[#deddd9] via-[#4a4a49] to-[#000000] opacity-30 blur-xl animate-ping-slow pointer-events-none" />
 
-          {isInputFocused && (
-            <div className="flex justify-center pt-2 pb-1 cursor-pointer" onClick={handleSlideUp}>
+          {/* Top pull-handle only when revealed */}
+          {(isInputFocused || activated) && (
+            <div
+              className="flex justify-center pt-2 pb-1 cursor-pointer"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleSlideUp(e);
+                // when collapsing, send it back to center
+                setDocked(false);
+              }}
+            >
               <div className="w-12 h-1 bg-white/30 rounded-full" />
             </div>
           )}
 
-          {/* QScore header (desktop) */}
-          <div className="px-4 pt-3">
-            <QScorePanel q={qscore} />
-          </div>
+          {/* -------- HERO (pre-activation) -------- */}
+          {!activated && (
+            <div className="relative flex-1 grid place-items-center py-10">
+              <div className="text-center px-6">
+                <h2 className="text-3xl font-semibold text-white/90 mb-6">Whats on your mind?</h2>
 
-          <div
-            ref={deskMessagesRef}
-            className="relative flex-1 overflow-y-auto p-4 space-y-4"
-            style={{ scrollBehavior: "smooth", maxHeight: "calc(80vh - 132px)" }}
-          >
-            {messages.map((m) => (
-              <MessageBubble key={m.id} m={m} />
-            ))}
-            <div ref={messagesEndRef} />
-            {isLoading && (
-              <div className="flex justify-start space-x-2 items-start">
-                <div className="flex-shrink-0 w-8 h-8 rounded-full overflow-hidden mr-2 border border-white/30">
-                  <Image src="/send.png" alt="Quossi AI" width={32} height={32} className="object-cover" />
+                {/* “Ask anything” CTA using your copy */}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setActivated(true);
+                    setIsInputFocused(true);
+                    setTimeout(() => textareaRef.current?.focus(), 0);
+                    window.setTimeout(() => setDocked(true), DOCK_DELAY_MS);
+                  }}
+                  className="group mx-auto flex items-center gap-3 rounded-full border border-white/15 bg-white/10 px-4 py-3 hover:bg-white/15 active:scale-95 transition"
+                >
+                  <span className="grid place-items-center w-9 h-9 rounded-full border border-white/15 bg-white/10 text-white/80 text-xl leading-none">
+                    +
+                  </span>
+                  <span className="text-white/70">Type a message…</span>
+                  <span className="ml-2 text-white/30 text-sm">(press to start)</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* -------- Chat history + typing area (after activation) -------- */}
+          {activated && (
+            <>
+              {/* Top section: QScore at the very top of the viewport/panel */}
+              {qscore && (
+                <div className="px-4 pt-3 shrink-0">
+                  <QScorePanel q={qscore} />
                 </div>
-                <div className="bg-yellow-400/90 text-black p-3 rounded-lg max-w-xs border border-black/20 shadow-lg">
-                  typing
+              )}
+
+              {/* Messages fill from top → bottom; own scroll */}
+              <div
+                ref={deskMessagesRef}
+                className="relative flex-1 min-h-0 overflow-y-auto p-4 pt-2 space-y-4"
+                style={{ scrollBehavior: "smooth" }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsInputFocused(true);
+                }}
+              >
+                {messages.map((m) => (
+                  <MessageBubble key={m.id} m={m} />
+                ))}
+
+                <div ref={messagesEndRef} />
+
+                {isLoading && (
+                  <div className="flex justify-start space-x-2 items-start">
+                    <div className="flex-shrink-0 w-8 h-8 rounded-full overflow-hidden mr-2 border border-white/30">
+                      <Image src="/send.png" alt="Quossi AI" width={32} height={32} className="object-cover" />
+                    </div>
+                    <div className="bg-yellow-400/90 text-black p-3 rounded-lg max-w-xs border border-black/20 shadow-lg">typing</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Input docks at the very bottom */}
+              <div className="relative p-2 bg-transparent border-t border-white/10 shrink-0">
+                <div className="flex gap-2 items-end">
+                  <textarea
+                    ref={textareaRef}
+                    rows={1}
+                    value={input}
+                    onChange={handleInputChange}
+                    onKeyDown={handleKeyPress}
+                    onFocus={() => setIsInputFocused(true)}
+                    className="flex-1 p-3 rounded-lg bg-white/30 text-white placeholder-white/70 border border-white/20 focus:outline-none focus:ring-2 focus:ring-yellow-400/50 resize-none overflow-hidden min-h-[44px] max-h-[100px]"
+                    placeholder="Type a message..."
+                    disabled={isLoading}
+                  />
+
+                  <button
+                    type="button"
+                    aria-label="Send message"
+                    disabled={!input.trim() || isLoading}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={handleSendMessage}
+                    className={`group relative grid place-items-center rounded-lg mb-1 border border-blue-300/20 backdrop-blur-sm transition w-11 h-11 ${
+                      input.trim() && !isLoading
+                        ? "bg-blue-500/30 hover:bg-blue-500/40 active:bg-blue-500/50"
+                        : "bg-white/10 opacity-60 cursor-not-allowed"
+                    }`}
+                  >
+                    <Image src="/send.png" alt="Send" width={45} height={45} className="select-none" />
+                    <span className="pointer-events-auto cursor-pointer absolute inset-0 rounded-lg ring-0 group-focus-visible:ring-2 ring-yellow-300/60" />
+                  </button>
                 </div>
               </div>
-            )}
-          </div>
-
-          <div className="relative p-2 bg-transparent border-t border-white/10">
-            <div className="flex gap-2 items-end">
-              <textarea
-                ref={textareaRef}
-                rows={1}
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyPress}
-                onFocus={() => setIsInputFocused(true)}
-                className="flex-1 p-3 rounded-lg bg-white/30 text-white placeholder-white/70 border border-white/20 focus:outline-none focus:ring-2 focus:ring-yellow-400/50 resize-none overflow-hidden min-h-[44px] max-h-[100px]"
-                placeholder="Type a message..."
-                disabled={isLoading}
-              />
-              <button
-                type="button"
-                aria-label="Send message"
-                disabled={!input.trim() || isLoading}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={handleSendMessage}
-                className={`group relative grid place-items-center rounded-lg mb-1 border border-blue-300/20 backdrop-blur-sm transition w-11 h-11 ${
-                  input.trim() && !isLoading
-                    ? "bg-blue-500/30 hover:bg-blue-500/40 active:bg-blue-500/50"
-                    : "bg-white/10 opacity-60 cursor-not-allowed"
-                }`}
-              >
-                <Image src="/send.png" alt="Send" width={45} height={45} className="select-none" />
-                <span className="pointer-events-auto cursor-pointer absolute inset-0 rounded-lg ring-0 group-focus-visible:ring-2 ring-yellow-300/60" />
-              </button>
-            </div>
-          </div>
+            </>
+          )}
         </div>
       </section>
 

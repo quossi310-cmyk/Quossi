@@ -2,9 +2,9 @@
 "use client";
 
 import Image from "next/image";
-import { useState, KeyboardEvent, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 /* === Capacitor StatusBar (Option A) === */
 import { Capacitor } from "@capacitor/core";
@@ -29,6 +29,13 @@ const OPEN_STATE_KEY = "chat_interface_open";
 const UID_KEY = "quossi_user_id";
 const LAST_QSCORE_KEY = "quossi_last_qscore";
 
+/* Docking behavior for desktop composer */
+const DOCK_DELAY_MS = 800;
+
+/* ===== AUTH PROMPT TIMING (15 minutes) ===== */
+const AUTH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+const AUTH_LAST_SHOWN_KEY = "quossi_auth_prompt_last_shown";
+
 /* ================= UTIL: LOCAL UID ================= */
 function getOrCreateUserId(): string {
   if (typeof window === "undefined") return "local-user";
@@ -40,14 +47,14 @@ function getOrCreateUserId(): string {
   return uid;
 }
 
-/* ================= SUPABASE (still optional in no-auth) ================= */
-const supabase =
+/* ================= SUPABASE (optional if no auth) ================= */
+const supabase: SupabaseClient | null =
   typeof window !== "undefined"
     ? createClient(
         process.env.NEXT_PUBLIC_SUPABASE_URL || "http://localhost",
         process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "public-anon-key"
       )
-    : (null as any);
+    : null;
 
 /* ================= SMALL UI PARTS ================= */
 function MessageBubble({ m }: { m: Message }) {
@@ -154,10 +161,10 @@ function AuthPromptModal({
           </p>
 
           <div className="mt-5 grid grid-cols-1 gap-2">
-            <button onClick={onSignin} className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 bg-white text-black font-semibold hover:bg-white/90 active:scale-98 transition">
+            <button onClick={onSignin} className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 bg-white text-black font-semibold hover:bg-white/90 active:scale-95 transition">
               <span>Login</span>
             </button>
-            <button onClick={onSignup} className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 bg-yellow-400 text-black font-semibold hover:bg-yellow-300 active:scale-98 transition">
+            <button onClick={onSignup} className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 bg-yellow-400 text-black font-semibold hover:bg-yellow-300 active:scale-95 transition">
               <span>Create account</span>
             </button>
           </div>
@@ -185,33 +192,37 @@ export default function Home() {
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [isInputFocused, setIsInputFocused] = useState(() => {
-    const stored = typeof window !== "undefined" ? localStorage.getItem(OPEN_STATE_KEY) : null;
-    return stored === "true";
+  const [isInputFocused, setIsInputFocused] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem(OPEN_STATE_KEY) === "true";
   });
+  const [activated, setActivated] = useState(false); // gate to hide history until user clicks
   const [isLoading, setIsLoading] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // IMPORTANT: Start closed on mobile; open only after tapping the button
   const [showMobileChat, setShowMobileChat] = useState(false);
 
+  const [docked, setDocked] = useState(false);
   const [qscore, setQscore] = useState<QScoreResult | null>(null);
-
   const [toast, setToast] = useState<{ open: boolean; text: string }>({ open: false, text: "" });
-  function notify(msg: string, ms = 2200) {
-    setToast({ open: true, text: msg });
-    window.clearTimeout((notify as any)._t);
-    (notify as any)._t = window.setTimeout(() => setToast((t: any) => ({ ...t, open: false })), ms);
-  }
-
   const [authPromptOpen, setAuthPromptOpen] = useState(false);
   const [isAuthed, setIsAuthed] = useState<boolean | null>(null);
 
+  function notify(msg: string, ms = 2200) {
+    setToast({ open: true, text: msg });
+    // @ts-expect-error store timer id
+    window.clearTimeout(notify._t);
+    // @ts-expect-error store timer id
+    notify._t = window.setTimeout(() => setToast((t) => ({ ...t, open: false })), ms);
+  }
+
   /* === Initialize Capacitor StatusBar: Option A === */
   useEffect(() => {
-    // Only on native Android
     if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== "android") return;
     (async () => {
       try {
-        await StatusBar.setOverlaysWebView({ overlay: false }); // <<< Key line (keeps content below status bar)
+        await StatusBar.setOverlaysWebView({ overlay: false }); // keeps content below status bar
         await StatusBar.setStyle({ style: Style.Dark });
         await StatusBar.setBackgroundColor({ color: "#000000" });
       } catch {
@@ -220,8 +231,8 @@ export default function Home() {
     })();
   }, []);
 
+  /* Check auth status once */
   useEffect(() => {
-    // Check auth status once
     let mounted = true;
     (async () => {
       try {
@@ -237,31 +248,64 @@ export default function Home() {
     };
   }, []);
 
+  /* ===== 15-minute auth nudges for unauthenticated users ===== */
   useEffect(() => {
     if (isAuthed) return;
-    const openTimeout = window.setTimeout(() => setAuthPromptOpen(true), 30_000);
-    const intervalId = window.setInterval(() => setAuthPromptOpen(true), 30_000);
-    const onKey = (e: KeyboardEvent) => {
-      if ((e as any).key === "Escape") setAuthPromptOpen(false);
+    let timeoutId: number | undefined;
+    let intervalId: number | undefined;
+
+    const now = Date.now();
+    const last = Number(localStorage.getItem(AUTH_LAST_SHOWN_KEY) || 0);
+    const elapsed = now - last;
+    const remaining = Math.max(AUTH_INTERVAL_MS - elapsed, 0);
+
+    const show = () => {
+      setAuthPromptOpen(true);
+      localStorage.setItem(AUTH_LAST_SHOWN_KEY, String(Date.now()));
     };
-    window.addEventListener("keydown", onKey as any);
+
+    timeoutId = window.setTimeout(() => {
+      show();
+      intervalId = window.setInterval(() => {
+        show();
+      }, AUTH_INTERVAL_MS);
+    }, remaining);
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAuthPromptOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+
     return () => {
-      window.clearTimeout(openTimeout);
-      window.clearInterval(intervalId);
-      window.removeEventListener("keydown", onKey as any);
+      if (timeoutId) window.clearTimeout(timeoutId);
+      if (intervalId) window.clearInterval(intervalId);
+      window.removeEventListener("keydown", onKey);
     };
   }, [isAuthed]);
 
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const isMobile = window.matchMedia("(max-width: 767px)").matches;
-      if (isMobile) setShowMobileChat(true);
-    }
-  }, []);
+  // ---------------------------
+  // MOBILE INTRO BEHAVIOR
+  // ---------------------------
 
+  // 1) Lock background scroll while intro is visible
+  useEffect(() => {
+    if (!showMobileChat) {
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      return () => { document.body.style.overflow = prev; };
+    }
+  }, [showMobileChat]);
+
+  // 2) Auto-focus textarea when chat opens
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (showMobileChat) {
+      setTimeout(() => textareaRef.current?.focus(), 120);
+    }
+  }, [showMobileChat]);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const interfaceRef = useRef<HTMLDivElement>(null);
+  const interfaceRef = useRef<HTMLElement>(null);
   const deskMessagesRef = useRef<HTMLDivElement>(null);
   const mobileMessagesRef = useRef<HTMLDivElement>(null);
 
@@ -273,6 +317,7 @@ export default function Home() {
     else el.scrollTop = el.scrollHeight;
   };
 
+  /* Load & migrate local messages (7-day retention) */
   useEffect(() => {
     const load = () => {
       const stored = localStorage.getItem(STORAGE_KEY);
@@ -280,7 +325,10 @@ export default function Home() {
         const parsed: Message[] = JSON.parse(stored);
         const now = Date.now();
         const filtered = parsed.filter((m) => now - m.timestamp < SEVEN_DAYS_MS);
-        const migrated = filtered.map((m) => ({ ...m, role: (m.role || "user") as const }));
+        const migrated: Message[] = filtered.map((m) => ({
+          ...m,
+          role: (m.role ?? "user") as Message["role"],
+        }));
         setMessages(migrated);
         localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
       }
@@ -290,6 +338,7 @@ export default function Home() {
     return () => clearInterval(id);
   }, []);
 
+  /* Initial QScore calculation once */
   useEffect(() => {
     if (hasValidatedOnceRef.current) return;
     hasValidatedOnceRef.current = true;
@@ -306,10 +355,12 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length]);
 
+  /* Persist composer open state */
   useEffect(() => {
     localStorage.setItem(OPEN_STATE_KEY, String(isInputFocused));
   }, [isInputFocused]);
 
+  /* Autoscroll on new messages */
   useEffect(() => {
     jumpToBottom(deskMessagesRef.current, true);
     if (showMobileChat) jumpToBottom(mobileMessagesRef.current, true);
@@ -357,10 +408,11 @@ export default function Home() {
     if (!input.trim() || isLoading) return;
 
     const userText = input.trim();
+    const now = Date.now();
     const userMsg: Message = {
       text: userText,
-      id: Date.now(),
-      timestamp: Date.now(),
+      id: now,
+      timestamp: now,
       role: "user",
     };
     const updated = [...messages, userMsg];
@@ -386,23 +438,25 @@ export default function Home() {
       }
 
       const { response } = await res.json();
+      const ts = Date.now();
       const assistantMsg: Message = {
         text: response,
-        id: Date.now() + 1,
-        timestamp: Date.now(),
+        id: ts,
+        timestamp: ts,
         role: "assistant",
       };
       finalUpdated = [...updated, assistantMsg];
       setMessages(finalUpdated);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUpdated));
 
-      const newHistory = finalUpdated.map((m) => ({ role: m.role, content: m.text }));
+      const newHistory = finalUpdated.map((m) => ({ role: m.role, content: m.text })); 
       await maybeUpdateQScore(newHistory);
     } catch (error: any) {
+      const ts = Date.now();
       const errorMsg: Message = {
-        text: `Error: ${error.message || "Could not get response."}`,
-        id: Date.now() + 1,
-        timestamp: Date.now(),
+        text: `Error: ${error?.message || "Could not get response."}`,
+        id: ts,
+        timestamp: ts,
         role: "assistant",
       };
       finalUpdated = [...updated, errorMsg];
@@ -413,7 +467,7 @@ export default function Home() {
     }
   };
 
-  const handleKeyPress = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSendMessage();
@@ -437,17 +491,6 @@ export default function Home() {
   const handleSlideUp = (e: React.MouseEvent) => {
     e.stopPropagation();
     setIsInputFocused(false);
-  };
-
-  const touchStartY = useRef<number | null>(null);
-  const onTouchStart = (e: React.TouchEvent) => {
-    touchStartY.current = e.touches[0].clientY;
-  };
-  const onTouchEnd = (e: React.TouchEvent) => {
-    if (touchStartY.current == null) return;
-    const delta = touchStartY.current - e.changedTouches[0].clientY;
-    if (delta > 40) setShowMobileChat(true);
-    touchStartY.current = null;
   };
 
   const handleGoSignin = () => {
@@ -534,9 +577,9 @@ export default function Home() {
         </button>
       </div>
 
-      {/* ===== MOBILE: FIXED TOP BAR (safe-area removed) ===== */}
+      {/* ===== MOBILE: FIXED TOP BAR ===== */}
       <header className="md:hidden fixed top-0 left-0 right-0 z-[30] bg-black/60 backdrop-blur-xl border-b border-white/10 pt-2">
-        <div className="flex items-center justify-between px-3 py-3">
+        <div className="flex items-center justify-between px-3 py-3 translate-y-[2%]">
           <button
             type="button"
             aria-label="Open menu"
@@ -557,7 +600,7 @@ export default function Home() {
         </div>
       </header>
 
-      {/* ===== MOBILE DRAWER (safe-area removed) ===== */}
+      {/* ===== MOBILE DRAWER ===== */}
       <div
         role="dialog"
         aria-modal="true"
@@ -603,16 +646,16 @@ export default function Home() {
         </nav>
       </div>
 
-      {/* ===== MOBILE CHAT (safe-area removed) ===== */}
+      {/* ===== MOBILE CHAT ===== */}
       <section className="md:hidden fixed inset-0 z-[25]">
         {!showMobileChat ? (
-          <div
-            className="absolute inset-0 pt-[72px] flex flex-col items-center justify-start gap-0 bg-transparent"
-            onTouchStart={onTouchStart}
-            onTouchEnd={onTouchEnd}
-          >
-            <Image src="/dave2.png" alt="SPARQ" width={900} height={360} priority className="free-swinging-dave" />
-            <button onClick={() => setShowMobileChat(true)} className="mt-0 px-5 py-2 rounded-full bg-white/20 border border-white/20">
+          // INTRO stays until the button is tapped
+          <div className="fixed inset-0 min-h-[100dvh] bg-transparent flex flex-col items-center justify-start gap-2 pt-[72px]">
+            <Image src="/dave2.png" alt="quossi" width={900} height={360} priority className="free-swinging-dave pointer-events-none select-none" />
+            <button
+              onClick={() => setShowMobileChat(true)}
+              className="mt-0 px-5 py-2 rounded-full bg-white/20 border border-white/20 backdrop-blur-md active:scale-95 transition"
+            >
               whats on your mind?
             </button>
           </div>
@@ -649,7 +692,10 @@ export default function Home() {
                   className="flex-1 p-6 rounded-xl bg-white/20 text-white placeholder-white/70 border border-white/20 focus:outline-none focus:ring-2 focus:ring-yellow-400/50 resize-none overflow-hidden min-h-[44px] max-h-[120px]"
                   placeholder="Type a message…"
                   disabled={isLoading}
-                  onFocus={() => setIsInputFocused(true)}
+                  onFocus={() => {
+                    setIsInputFocused(true);
+                    setActivated(true);
+                  }}
                 />
                 <button
                   type="button"
@@ -657,11 +703,14 @@ export default function Home() {
                   disabled={!input.trim() || isLoading}
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={handleSendMessage}
-                  className={`grid place-items-center rounded-xl border border-blue-300/20 transition w-12 h-18 ${
-                    input.trim() && !isLoading ? "bg-blue-500/60 hover:bg-blue-500/70 active:bg-blue-500/80" : "bg-white/10 opacity-60 cursor-pointer"
+                  className={`group relative grid place-items-center rounded-lg mb-1 border backdrop-blur-sm transition-colors w-11 h-11 ${
+                    input.trim() && !isLoading
+                      ? "border-blue-300/20 bg-blue-500/30 hover:bg-blue-500/40 active:!bg-black active:!bg-opacity-100 active:!border-black"
+                      : "bg-white/10 opacity-60 cursor-not-allowed border-white/20"
                   }`}
                 >
-                  <Image src="/send.png" alt="Send" width={22} height={22} />
+                  <Image src="/send.png" alt="Send" width={45} height={45} className="select-none" />
+                  <span className="pointer-events-auto cursor-pointer absolute inset-0 rounded-lg ring-0 group-focus-visible:ring-2 ring-yellow-300/60" />
                 </button>
               </div>
             </div>
@@ -669,85 +718,155 @@ export default function Home() {
         )}
       </section>
 
-      {/* ===== DESKTOP CHAT ===== */}
+      {/* ===== DESKTOP CHAT (full-height ➜ docked) ===== */}
       <section
         ref={interfaceRef}
         className={`hidden md:block fixed left-1/2 z-[50] w-full max-w-2xl -translate-x-1/2 px-4 transition-[top,bottom,transform] duration-300 ease-out ${
-          isInputFocused ? "bottom-6 top-auto translate-y-0" : "top-1/2 -translate-y-1/2"
+          activated
+            ? (docked ? "bottom-6 top-auto translate-y-0" : "top-0 bottom-0 translate-y-0")
+            : "top-1/2 -translate-y-1/2"
         }`}
       >
         <div
-          className={`relative flex flex-col w-full overflow-hidden rounded-2xl bg-transparent backdrop-blur-0 border border-white/10 shadow-lg transition-[max-height,opacity,box-shadow] duration-300 ease-out ${
-            isInputFocused ? "opacity-100 yellow-glow-animation" : "opacity-95"
-          }`}
-          onClick={() => setIsInputFocused(true)}
-          style={{ maxHeight: isInputFocused ? "80vh" : "8rem" }}
+          className={`relative flex flex-col w-full overflow-hidden rounded-2xl bg-transparent backdrop-blur-0 border border-white/10 shadow-lg transition-[opacity,box-shadow,height,max-height] duration-300 ease-out ${
+            (isInputFocused || activated) ? "opacity-100 yellow-glow-animation" : "opacity-95"
+          } ${activated ? (docked ? "h-[85vh] max-h-[85vh]" : "h-[100vh] max-h-[100vh]") : ""}`}
+          onClick={() => {
+            if (!activated) {
+              setActivated(true);
+              setIsInputFocused(true);
+              setTimeout(() => textareaRef.current?.focus(), 0);
+              // stay full-height briefly, then dock to bottom
+              window.setTimeout(() => setDocked(true), DOCK_DELAY_MS);
+            }
+          }}
         >
+          {/* soft background pulse */}
           <div className="absolute inset-0 rounded-2xl bg-gradient-to-r from-[#deddd9] via-[#4a4a49] to-[#000000] opacity-30 blur-xl animate-ping-slow pointer-events-none" />
 
-          {isInputFocused && (
-            <div className="flex justify-center pt-2 pb-1 cursor-pointer" onClick={handleSlideUp}>
+          {/* Top pull-handle only when revealed */}
+          {(isInputFocused || activated) && (
+            <div
+              className="flex justify-center pt-2 pb-1 cursor-pointer"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleSlideUp(e);
+                // when collapsing, send it back to center
+                setDocked(false);
+              }}
+            >
               <div className="w-12 h-1 bg-white/30 rounded-full" />
             </div>
           )}
 
-          {/* QScore header (desktop) */}
-          <div className="px-4 pt-3">
-            <QScorePanel q={qscore} />
-          </div>
+          {/* -------- HERO (pre-activation) -------- */}
+          {!activated && (
+            <div className="relative flex-1 grid place-items-center py-10">
+              <div className="text-center px-6">
+                <h2 className="text-3xl font-semibold text-white/90 mb-6">Whats on your mind?</h2>
 
-          <div
-            ref={deskMessagesRef}
-            className="relative flex-1 overflow-y-auto p-4 space-y-4"
-            style={{ scrollBehavior: "smooth", maxHeight: "calc(80vh - 132px)" }}
-          >
-            {messages.map((m) => (
-              <MessageBubble key={m.id} m={m} />
-            ))}
-            <div ref={messagesEndRef} />
-            {isLoading && (
-              <div className="flex justify-start space-x-2 items-start">
-                <div className="flex-shrink-0 w-8 h-8 rounded-full overflow-hidden mr-2 border border-white/30">
-                  <Image src="/send.png" alt="Quossi AI" width={32} height={32} className="object-cover" />
-                </div>
-                <div className="bg-yellow-400/90 text-black p-3 rounded-lg max-w-xs border border-black/20 shadow-lg">typing</div>
+                {/* “Ask anything” CTA using your copy */}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setActivated(true);
+                    setIsInputFocused(true);
+                    setTimeout(() => textareaRef.current?.focus(), 0);
+                    window.setTimeout(() => setDocked(true), DOCK_DELAY_MS);
+                  }}
+                  className="group mx-auto flex items-center gap-3 rounded-full border border-white/15 bg-white/10 px-4 py-3 hover:bg-white/15 active:scale-95 transition"
+                >
+                  <span className="grid place-items-center w-9 h-9 rounded-full border border-white/15 bg-white/10 text-white/80 text-xl leading-none">
+                    +
+                  </span>
+                  <span className="text-white/70">Type a message…</span>
+                  <span className="ml-2 text-white/30 text-sm">(press to start)</span>
+                </button>
               </div>
-            )}
-          </div>
-
-          <div className="relative p-2 bg-transparent border-t border-white/10">
-            <div className="flex gap-2 items-end">
-              <textarea
-                ref={textareaRef}
-                rows={1}
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyPress}
-                onFocus={() => setIsInputFocused(true)}
-                className="flex-1 p-3 rounded-lg bg-white/30 text-white placeholder-white/70 border border-white/20 focus:outline-none focus:ring-2 focus:ring-yellow-400/50 resize-none overflow-hidden min-h-[44px] max-h-[100px]"
-                placeholder="Type a message..."
-                disabled={isLoading}
-              />
-              <button
-                type="button"
-                aria-label="Send message"
-                disabled={!input.trim() || isLoading}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={handleSendMessage}
-                className={`group relative grid place-items-center rounded-lg mb-1 border border-blue-300/20 backdrop-blur-sm transition w-11 h-11 ${
-                  input.trim() && !isLoading ? "bg-blue-500/30 hover:bg-blue-500/40 active:bg-blue-500/50" : "bg-white/10 opacity-60 cursor-not-allowed"
-                }`}
-              >
-                <Image src="/send.png" alt="Send" width={45} height={45} className="select-none" />
-                <span className="pointer-events-auto cursor-pointer absolute inset-0 rounded-lg ring-0 group-focus-visible:ring-2 ring-yellow-300/60" />
-              </button>
             </div>
-          </div>
+          )}
+
+          {/* -------- Chat history + typing area (after activation) -------- */}
+          {activated && (
+            <>
+              {/* Top section: QScore at the very top of the viewport/panel */}
+              {qscore && (
+                <div className="px-4 pt-3 shrink-0">
+                  <QScorePanel q={qscore} />
+                </div>
+              )}
+
+              {/* Messages fill from top → bottom; own scroll */}
+              <div
+                ref={deskMessagesRef}
+                className="relative flex-1 min-h-0 overflow-y-auto p-4 pt-2 space-y-4"
+                style={{ scrollBehavior: "smooth" }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsInputFocused(true);
+                }}
+              >
+                {messages.map((m) => (
+                  <MessageBubble key={m.id} m={m} />
+                ))}
+
+                <div ref={messagesEndRef} />
+
+                {isLoading && (
+                  <div className="flex justify-start space-x-2 items-start">
+                    <div className="flex-shrink-0 w-8 h-8 rounded-full overflow-hidden mr-2 border border-white/30">
+                      <Image src="/send.png" alt="Quossi AI" width={32} height={32} className="object-cover" />
+                    </div>
+                    <div className="bg-yellow-400/90 text-black p-3 rounded-lg max-w-xs border border-black/20 shadow-lg">typing</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Input docks at the very bottom */}
+              <div className="relative p-2 bg-transparent border-t border-white/10 shrink-0">
+                <div className="flex gap-2 items-end">
+                  <textarea
+                    ref={textareaRef}
+                    rows={1}
+                    value={input}
+                    onChange={handleInputChange}
+                    onKeyDown={handleKeyPress}
+                    onFocus={() => setIsInputFocused(true)}
+                    className="flex-1 p-3 rounded-lg bg-white/30 text-white placeholder-white/70 border border-white/20 focus:outline-none focus:ring-2 focus:ring-yellow-400/50 resize-none overflow-hidden min-h-[44px] max-h-[100px]"
+                    placeholder="Type a message..."
+                    disabled={isLoading}
+                  />
+
+                  <button
+                    type="button"
+                    aria-label="Send message"
+                    disabled={!input.trim() || isLoading}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={handleSendMessage}
+                    className={`group relative grid place-items-center rounded-lg mb-1 border border-blue-300/20 backdrop-blur-sm transition w-11 h-11 ${
+                      input.trim() && !isLoading
+                        ? "bg-blue-500/30 hover:bg-blue-500/40 active:bg-blue-500/50"
+                        : "bg-white/10 opacity-60 cursor-not-allowed"
+                    }`}
+                  >
+                    <Image src="/send.png" alt="Send" width={45} height={45} className="select-none" />
+                    <span className="pointer-events-auto cursor-pointer absolute inset-0 rounded-lg ring-0 group-focus-visible:ring-2 ring-yellow-300/60" />
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </section>
 
-      {/* ===== Auth popup modal (every 30s) ===== */}
-      <AuthPromptModal open={!!authPromptOpen} onClose={() => setAuthPromptOpen(false)} onSignin={handleGoSignin} onSignup={handleGoSignup} />
+      {/* ===== Auth popup modal (every 15min) ===== */}
+      <AuthPromptModal
+        open={!!authPromptOpen}
+        onClose={() => setAuthPromptOpen(false)}
+        onSignin={handleGoSignin}
+        onSignup={handleGoSignup}
+      />
 
       {/* Keyframes & extras */}
       <style jsx global>{`
@@ -759,7 +878,7 @@ export default function Home() {
         @keyframes glowAnimation {
           0% { filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.3)); }
           50% { filter: drop-shadow(0 0 20px rgba(255, 255, 255, 0.7)); }
-          100% { filter: drop-shadow(0 0 0 10px rgba(255, 255, 255, 0.3)); }
+          100% { filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.3)); }
         }
         @keyframes yellowGlowAnimation {
           0% { box-shadow: 0 0 20px rgba(255, 215, 0, 0.3), 0 0 40px rgba(255, 215, 0, 0.2), inset 0 0 20px rgba(255, 215, 0, 0.1); }
