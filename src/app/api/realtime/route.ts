@@ -1,34 +1,58 @@
 // app/api/realtime/route.ts
-import { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 
-export const runtime = "edge";
+export async function POST() {
+  try {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "Missing OPENAI_API_KEY" },
+        { status: 500 }
+      );
+    }
 
-export async function POST(req: NextRequest) {
-  // Optional: pass initial instructions / tools for your “Quossi AI”
-  const body = await req.json().catch(() => ({}));
+    // Pick your realtime model; keep it in env so you can switch easily
+    const model =
+      process.env.OPENAI_REALTIME_MODEL ||
+      "gpt-4o-realtime-preview-2024-12-17";
 
-  const r = await fetch("https://api.openai.com/v1/realtime/sessions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY!}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      // pick a realtime-capable model and a voice you like
-      model: "gpt-4o-realtime-preview",    // or the latest realtime model
-      voice: "verse",                       // e.g. marin, alloy, verse…
-      modalities: ["audio", "text"],
-      // you can seed system instructions for QUOSSI here:
-      instructions: body?.instructions ?? "You are QUOSSI. Be warm, concise, and helpful."
-    }),
-  });
+    // Create a short-lived client secret (NO nested `session.*` keys)
+    const resp = await fetch("https://api.openai.com/v1/realtime/sessions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        // top-level options:
+        voice: "verse",                 // <- was session.voice (wrong)
+        modalities: ["audio", "text"],  // optional but handy
+        // optional:
+        // instructions: "You are Quossi. Be concise and warm.",
+        // expires_in: 600, // seconds (optional)
+      }),
+    });
 
-  if (!r.ok) {
-    const err = await r.text();
-    return new Response(JSON.stringify({ error: err }), { status: 500 });
+    const text = await resp.text();
+    if (!resp.ok) {
+      // proxy the exact OpenAI error to the client to make debugging easy
+      return NextResponse.json(
+        { error: text ? JSON.parse(text) : "OpenAI error" },
+        { status: 500 }
+      );
+    }
+
+    const json = text ? JSON.parse(text) : {};
+    // shape is: { id, client_secret: { value, ... }, ... }
+    return NextResponse.json(
+      { client_secret: json.client_secret },
+      { status: 200 }
+    );
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err?.message || "Server error" },
+      { status: 500 }
+    );
   }
-
-  const json = await r.json();
-  // The response includes a short-lived client_secret for WebRTC
-  return new Response(JSON.stringify(json), { status: 200, headers: { "Content-Type": "application/json" }});
 }

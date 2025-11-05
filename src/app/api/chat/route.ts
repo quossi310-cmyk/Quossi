@@ -1,7 +1,7 @@
 // app/api/chat/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
-import { SYSTEM_PROMPT } from "@/app/lib/systemPrompt";
+import { buildSystemPromp } from "@/app/lib/systemPrompt";
 import {
   corsHeaders,
   handleOptions,
@@ -144,6 +144,18 @@ export async function POST(req: NextRequest) {
         content: message.trim(),
         ts: Date.now(),
       });
+
+      // Fire-and-forget: inform Python function to track chat toward QScore updates
+      try {
+        // Keep it non-blocking; errors are ignored
+        fetch("/api/quossi_2_0", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ event: "chat", user: userId, message: message.trim() }),
+          // keepalive helps if client disconnects
+          keepalive: true,
+        }).catch(() => {});
+      } catch {}
     }
 
     // You were using the Responses API; keep that

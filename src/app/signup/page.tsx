@@ -7,9 +7,6 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import { supabaseBrowser } from "@/app/lib/supabase/client";
 
-// Load Spline client-side only (optional safety)
-const Spline = dynamic(() => import("@splinetool/react-spline"), { ssr: false });
-
 // tiny password score helper
 function scorePassword(pw: string) {
   let s = 0;
@@ -153,8 +150,8 @@ function SignUpInner() {
       {/* Scrollable content */}
       <div className="relative z-40 flex flex-col items-center justify-start min-h-screen px-4 py-16">
         <div className="bg-white/10 backdrop-blur-md border border-white/20 shadow-[0_0_25px_rgba(255,255,255,0.3)] rounded-2xl p-10 w-[90%] max-w-md text-center mb-24">
-          <h2 className="glow-bounce text-3xl font-bold mb-6 text-black drop-shadow-[0_0_15px_rgba(0,0,0,0.3)]">
-            Create Your Account
+          <h2 className="glow-bounce text-3xl font-bold mb-6 text-yellow-400 drop-shadow-[0_0_15px_rgba(255,215,0,0.8)]">
+            Create An Account
           </h2>
 
           {!envOK && (

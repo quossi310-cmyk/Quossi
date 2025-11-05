@@ -1,15 +1,15 @@
-// pages/index.tsx (TypeScript-safe, Netlify-friendly)
+// pages/index.tsx — Mobile intro removed, mobile shows chat immediately
 "use client";
 
 import Image from "next/image";
-import React, {
-  useState,
-  useEffect,
-  useRef,
-  KeyboardEvent,
-} from "react";
+import React, { useState, useEffect, useRef } from "react";
+import QScoreBanner from "@/app/components/QScoreCard";
 import { useRouter } from "next/navigation";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+
+/* === Capacitor StatusBar (Option A) === */
+import { Capacitor } from "@capacitor/core";
+import { StatusBar, Style } from "@capacitor/status-bar";
 
 /* ================= QSCORE TYPES ================= */
 type Tone = "positive" | "neutral" | "stressed";
@@ -29,31 +29,74 @@ const STORAGE_KEY = "chat_messages";
 const OPEN_STATE_KEY = "chat_interface_open";
 const UID_KEY = "quossi_user_id";
 const LAST_QSCORE_KEY = "quossi_last_qscore";
-const DOCK_DELAY_MS = 400;
+const QSCORE_CARD_SHOWN_KEY = "quossi_qscore_card_shown";
+
+/* Docking behavior for desktop composer */
+const DOCK_DELAY_MS = 800;
+
+/* ===== AUTH PROMPT TIMING (disabled) ===== */
+const AUTH_INTERVAL_MS = 15 * 60 * 1000; // kept for future use
+const AUTH_LAST_SHOWN_KEY = "quossi_auth_prompt_last_shown";
+const AUTH_NUDGES_ENABLED = false as const; // << turn off auto popups
+
+/* ==== Realtime voice (model) ==== */
+/** Use the dated preview that matches the sessions API; keep override via env when needed */
+const REALTIME_MODEL =
+  process.env.NEXT_PUBLIC_OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview-2024-12-17";
 
 /* ================= UTIL: LOCAL UID ================= */
 function getOrCreateUserId(): string {
   if (typeof window === "undefined") return "local-user";
-  try {
-    let uid = localStorage.getItem(UID_KEY);
-    if (!uid) {
-      uid = `u_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
-      localStorage.setItem(UID_KEY, uid);
-    }
-    return uid;
-  } catch {
-    return "local-user";
+  let uid = localStorage.getItem(UID_KEY);
+  if (!uid) {
+    uid = `u_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+    localStorage.setItem(UID_KEY, uid);
   }
+  return uid;
 }
 
-/* ================= SUPABASE (optional) ================= */
+/* ================= SUPABASE (optional if no auth) ================= */
 const supabase: SupabaseClient | null =
   typeof window !== "undefined"
     ? createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://localhost",
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "public-anon-key"
+        process.env.NEXT_PUBLIC_SUPABASE_URL || "http://localhost",
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "public-anon-key"
       )
     : null;
+
+/* ================= SMALL UTILS ================= */
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, ms = 15000) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), ms);
+  try {
+    const res = await fetch(input, { ...init, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/** Wait until ICE gathering completes so our SDP actually contains candidates */
+function waitForIceGatheringComplete(pc: RTCPeerConnection): Promise<void> {
+  return new Promise((resolve) => {
+    if (pc.iceGatheringState === "complete") {
+      resolve();
+      return;
+    }
+    const check = () => {
+      if (pc.iceGatheringState === "complete") {
+        pc.removeEventListener("icegatheringstatechange", check);
+        resolve();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", check);
+    // safety timeout
+    setTimeout(() => {
+      pc.removeEventListener("icegatheringstatechange", check);
+      resolve();
+    }, 2500);
+  });
+}
 
 /* ================= SMALL UI PARTS ================= */
 function MessageBubble({ m }: { m: Message }) {
@@ -87,7 +130,6 @@ function MessageBubble({ m }: { m: Message }) {
   );
 }
 
-/** Compact badge + expandable panel for QScore (renders ONLY when qscore exists) */
 function QScorePanel({ q }: { q: QScoreResult | null }) {
   if (!q) return null;
 
@@ -100,7 +142,6 @@ function QScorePanel({ q }: { q: QScoreResult | null }) {
 
   return (
     <div className="animate-slide-up">
-      {/* Badge row */}
       <div className="flex items-center gap-2">
         <span className={`px-2 py-1 text-xs rounded-md border ${toneColor}`}>Tone: {q.tone}</span>
         <span className="px-2 py-1 text-xs rounded-md border border-yellow-400/40 bg-yellow-400/10 text-yellow-200">
@@ -111,7 +152,6 @@ function QScorePanel({ q }: { q: QScoreResult | null }) {
         </span>
       </div>
 
-      {/* Task card */}
       {q.task && (
         <div className="mt-2 p-3 rounded-lg border border-white/10 bg-white/5">
           <div className="text-xs uppercase tracking-wide text-white/60 mb-1">Suggested Task</div>
@@ -123,154 +163,390 @@ function QScorePanel({ q }: { q: QScoreResult | null }) {
   );
 }
 
+/* ============== AUTH PROMPT MODAL ============== */
+function AuthPromptModal({
+  open,
+  onClose,
+  onSignin,
+  onSignup,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSignin: () => void;
+  onSignup: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Sign in or create account" className="fixed inset-0 z-[100] flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div
+        className="relative z-[101] w-[92%] max-w-md rounded-2xl border border-white/15 bg-[#0b0b0b]/95 text-white shadow-2xl animate-auth-pop"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="absolute inset-0 -z-10 rounded-2xl bg-gradient-to-br from-blue-500/15 via-yellow-400/10 to-white/5 blur-2xl" />
+        <div className="px-5 pt-5 pb-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold">Create an account</h3>
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              className="w-9 h-9 grid place-items-center rounded-lg border border-white/15 bg-white/10 hover:bg-white/15 active:scale-95"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18" stroke="white" strokeWidth="1.8" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
+
+          <p className="mt-2 text-sm text-white/80">
+            Unlock your dashboard, save chats, and get paid with QUOSSI. Login if you already have an account, or sign up in seconds.
+          </p>
+
+          <div className="mt-5 grid grid-cols-1 gap-2">
+            <button onClick={onSignin} className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 bg-white text-black font-semibold hover:bg-white/90 active:scale-95 transition">
+              <span>Login</span>
+            </button>
+            <button onClick={onSignup} className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 bg-yellow-400 text-black font-semibold hover:bg-yellow-300 active:scale-95 transition">
+              <span>Create account</span>
+            </button>
+          </div>
+
+          <button onClick={onClose} className="mt-3 w-full text-center text-sm text-white/70 hover:text-white underline underline-offset-4">
+            Not now
+          </button>
+        </div>
+      </div>
+      <style jsx>{`
+        @keyframes auth-pop {
+          0% { transform: translateY(12px) scale(0.98); opacity: 0; }
+          100% { transform: translateY(0) scale(1); opacity: 1; }
+        }
+        .animate-auth-pop { animation: auth-pop 180ms ease-out both; }
+      `}</style>
+    </div>
+  );
+}
+
 /* ================= MAIN ================= */
 export default function Home() {
   const router = useRouter();
   const userId = getOrCreateUserId();
 
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState<string>("");
+  const [input, setInput] = useState("");
   const [isInputFocused, setIsInputFocused] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
-    try {
-      const stored = localStorage.getItem(OPEN_STATE_KEY);
-      return stored === "true";
-    } catch {
-      return false;
-    }
+    return localStorage.getItem(OPEN_STATE_KEY) === "true";
   });
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
+  const [activated, setActivated] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Desktop reveal/docking state (these were referenced but not defined before)
-  const [activated, setActivated] = useState<boolean>(false);
-  const [docked, setDocked] = useState<boolean>(false);
+  // NOTE: removed showMobileChat + intro. Mobile always shows chat now.
 
-  // IMPORTANT: Start closed on mobile; open only after tapping the button
-  const [showMobileChat, setShowMobileChat] = useState<boolean>(false);
-
-  // QScore state (only shown when backend "allows")
+  const [docked, setDocked] = useState(false);
   const [qscore, setQscore] = useState<QScoreResult | null>(null);
-
-  // ===== Toast state + helper =====
   const [toast, setToast] = useState<{ open: boolean; text: string }>({ open: false, text: "" });
-  const toastTimeoutRef = useRef<number | null>(null);
+  const [authPromptOpen, setAuthPromptOpen] = useState(false);
+  const [isAuthed, setIsAuthed] = useState<boolean | null>(null);
 
-  function notify(msg: string, ms = 2200) {
+  // --- Voice/WebRTC refs & state ---
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [voiceOn, setVoiceOn] = useState(false);
+
+  function notify(msg: string, ms = 2400) {
     setToast({ open: true, text: msg });
-    if (toastTimeoutRef.current) {
-      window.clearTimeout(toastTimeoutRef.current);
-    }
-    toastTimeoutRef.current = window.setTimeout(() => {
-      setToast((t) => ({ ...t, open: false }));
-      toastTimeoutRef.current = null;
-    }, ms);
+    // @ts-expect-error store timer id
+    window.clearTimeout((notify as any)._t);
+    // @ts-expect-error store timer id
+    (notify as any)._t = window.setTimeout(() => setToast((t) => ({ ...t, open: false })), ms);
   }
 
-  // -------- MOBILE INTRO BEHAVIOR --------
-  // Lock background scroll while intro is visible
-  useEffect(() => {
-    if (!showMobileChat) {
-      const prev = document.body.style.overflow;
-      document.body.style.overflow = "hidden";
-      return () => {
-        document.body.style.overflow = prev;
+  async function startVoiceChat() {
+    if (voiceOn) return;
+    // Guard: secure context & media support
+    if (typeof window === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      notify("Voice not supported in this browser context.");
+      return;
+    }
+    try {
+      // 1) RTCPeerConnection with STUN
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
+      });
+      pcRef.current = pc;
+
+      // 2) Remote audio -> hidden <audio>
+      pc.ontrack = (e) => {
+        if (remoteAudioRef.current) {
+          remoteAudioRef.current.srcObject = e.streams[0];
+          // attempt to unlock playback immediately (mobile safari)
+          remoteAudioRef.current.play().catch(() => {});
+        }
       };
-    }
-  }, [showMobileChat]);
 
-  // Auto-focus textarea when chat opens
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+      // 3) Mic capture
+      const mic = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      for (const track of mic.getTracks()) pc.addTrack(track, mic);
+
+      // Optional: data channel
+      pc.createDataChannel("oai-events");
+
+      // 4) Local offer
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      await pc.setLocalDescription(offer);
+
+      // 4.5) Wait for ICE gathering to include candidates
+      await waitForIceGatheringComplete(pc);
+
+      // 5) Fetch ephemeral client_secret from our server
+      const sessionResp = await fetchWithTimeout("/api/realtime", { method: "POST" }, 15000);
+      if (!sessionResp.ok) {
+        const text = await sessionResp.text().catch(() => "");
+        throw new Error(`/api/realtime failed: ${sessionResp.status} ${text}`);
+      }
+      const session = await sessionResp.json().catch(() => ({}));
+      const ephemeralKey = session?.client_secret?.value;
+      if (!ephemeralKey) throw new Error("No client_secret returned from /api/realtime");
+
+      // 6) Exchange SDP with OpenAI Realtime (REST SDP flow)
+      const sdpResp = await fetchWithTimeout(
+        `https://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${ephemeralKey}`, // ek_...
+            "Content-Type": "application/sdp",
+            "OpenAI-Beta": "realtime=v1", // REQUIRED
+          },
+          body: pc.localDescription?.sdp || offer.sdp || "",
+        },
+        20000
+      );
+
+      if (!sdpResp.ok) {
+        const t = await sdpResp.text().catch(() => "");
+        throw new Error(`OpenAI SDP exchange failed: ${sdpResp.status} ${t}`);
+      }
+
+      const answerSdp = await sdpResp.text();
+      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+      setVoiceOn(true);
+      notify(`🎙️ Voice with ${process.env.NEXT_PUBLIC_QUOSSI_NAME ?? "Quossi"} is live`);
+    } catch (err: any) {
+      console.error("startVoiceChat error:", err);
+      notify(`Voice error: ${err?.message ?? "Failed to start"}`);
+      try { pcRef.current?.getSenders().forEach((s) => s.track?.stop()); } catch {}
+      try { pcRef.current?.close(); } catch {}
+      pcRef.current = null;
+      setVoiceOn(false);
+    }
+  }
+
+  function stopVoiceChat() {
+    setVoiceOn(false);
+    try { pcRef.current?.getSenders().forEach((s) => s.track?.stop()); } catch {}
+    try { pcRef.current?.close(); } catch {}
+    pcRef.current = null;
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
+  }
+
+  // Cleanup on unmount & when tab is hidden (prevents zombie mic)
   useEffect(() => {
-    if (showMobileChat) {
-      const id = window.setTimeout(() => textareaRef.current?.focus(), 120);
-      return () => window.clearTimeout(id);
-    }
-  }, [showMobileChat]);
+    const onVis = () => {
+      if (document.visibilityState === "hidden") stopVoiceChat();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      stopVoiceChat();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const interfaceRef = useRef<HTMLDivElement | null>(null);
-  const deskMessagesRef = useRef<HTMLDivElement | null>(null);
-  const mobileMessagesRef = useRef<HTMLDivElement | null>(null);
+  /* === Initialize Capacitor StatusBar: Option A === */
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== "android") return;
+    (async () => {
+      try {
+        await StatusBar.setOverlaysWebView({ overlay: false });
+        await StatusBar.setStyle({ style: Style.Dark });
+        await StatusBar.setBackgroundColor({ color: "#000000" });
+      } catch {
+        // ignore on web or if plugin not installed
+      }
+    })();
+  }, []);
 
-  // run-once guard for initial QScore validation
-  const hasValidatedOnceRef = useRef<boolean>(false);
+  /* Check auth status once */
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        if (!supabase) return setIsAuthed(false);
+        const { data } = await supabase.auth.getUser();
+        if (mounted) setIsAuthed(!!data?.user);
+      } catch {
+        if (mounted) setIsAuthed(false);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  /* Clear any stale "last shown" to avoid surprise re-opens */
+  useEffect(() => {
+    try { localStorage.removeItem(AUTH_LAST_SHOWN_KEY); } catch {}
+  }, []);
+
+  /* ===== helper: open auth modal immediately (used by Call icon) ===== */
+  const openAuthModalNow = () => {
+    setAuthPromptOpen(true);
+    try {
+      localStorage.setItem(AUTH_LAST_SHOWN_KEY, String(Date.now()));
+    } catch {}
+  };
+
+  /* ===== (DISABLED) 15-minute auth nudges for unauthenticated users ===== */
+  useEffect(() => {
+    if (!AUTH_NUDGES_ENABLED || isAuthed) return;
+
+    let timeoutId: number | undefined;
+    let intervalId: number | undefined;
+
+    const now = Date.now();
+    const last = Number(localStorage.getItem(AUTH_LAST_SHOWN_KEY) || 0);
+    const elapsed = now - last;
+    const remaining = Math.max(AUTH_INTERVAL_MS - elapsed, 0);
+
+    const show = () => {
+      setAuthPromptOpen(true);
+      localStorage.setItem(AUTH_LAST_SHOWN_KEY, String(Date.now()));
+    };
+
+    timeoutId = window.setTimeout(() => {
+      show();
+      intervalId = window.setInterval(() => {
+        show();
+      }, AUTH_INTERVAL_MS);
+    }, remaining);
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAuthPromptOpen(false);
+    } as any;
+    window.addEventListener("keydown", onKey as any);
+
+    return () => {
+      if (timeoutId) window.clearTimeout(timeoutId);
+      if (intervalId) window.clearInterval(intervalId);
+      window.removeEventListener("keydown", onKey as any);
+    };
+  }, [isAuthed]);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const interfaceRef = useRef<HTMLElement>(null);
+  const deskMessagesRef = useRef<HTMLDivElement>(null);
+  const mobileMessagesRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const hasValidatedOnceRef = useRef(false);
+  const [qscoreModalOpen, setQscoreModalOpen] = useState(false);
 
   const jumpToBottom = (el: HTMLDivElement | null, smooth = false) => {
     if (!el) return;
-    if (smooth) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    } else {
-      el.scrollTop = el.scrollHeight;
-    }
+    if (smooth) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    else el.scrollTop = el.scrollHeight;
   };
 
-  // Load chat only (<=7 days old). DO NOT auto-load qscore from localStorage.
+  /* Load & migrate local messages (7-day retention) */
   useEffect(() => {
     const load = () => {
-      try {
-        const stored = localStorage.getItem(STORAGE_KEY);
-        if (stored) {
-          const parsed = JSON.parse(stored) as Message[];
-          const now = Date.now();
-          const filtered = parsed.filter((m) => now - m.timestamp < SEVEN_DAYS_MS);
-          const migrated: Message[] = filtered.map((m) => ({
-            ...m,
-            role: m.role === "assistant" ? "assistant" : "user",
-          }));
-          setMessages(migrated);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
-        }
-      } catch {
-        // ignore JSON errors
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        const parsed: Message[] = JSON.parse(stored);
+        const now = Date.now();
+        const filtered = parsed.filter((m) => now - m.timestamp < SEVEN_DAYS_MS);
+        const migrated: Message[] = filtered.map((m) => ({
+          ...m,
+          role: (m.role ?? "user") as Message["role"],
+        }));
+        setMessages(migrated);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
       }
     };
     load();
-    const id = window.setInterval(load, 60 * 60 * 1000);
-    return () => window.clearInterval(id);
+    const id = setInterval(load, 60 * 60 * 1000);
+    return () => clearInterval(id);
   }, []);
 
-  // After first load, validate once with backend. If not allowed, ensure QScore is hidden.
+  /* Show QScore card once after 10s on dashboard */
+  useEffect(() => {
+    try {
+      const shown = localStorage.getItem(QSCORE_CARD_SHOWN_KEY);
+      if (shown === "1") return;
+      const id = window.setTimeout(() => {
+        setQscoreModalOpen(true);
+        try { localStorage.setItem(QSCORE_CARD_SHOWN_KEY, "1"); } catch {}
+      }, 10000);
+      return () => window.clearTimeout(id);
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  /* Initial QScore calculation once */
   useEffect(() => {
     if (hasValidatedOnceRef.current) return;
     hasValidatedOnceRef.current = true;
-
-    const t = window.setTimeout(() => {
+    const t = setTimeout(() => {
       const history = messages.map((m) => ({ role: m.role, content: m.text }));
       if (history.length) {
-        void maybeUpdateQScore(history);
+        maybeUpdateQScore(history);
       } else {
         setQscore(null);
-        try {
-          localStorage.removeItem(LAST_QSCORE_KEY);
-        } catch {}
+        localStorage.removeItem(LAST_QSCORE_KEY);
       }
     }, 0);
-    return () => window.clearTimeout(t);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length]);
 
+  /* Persist composer open state */
   useEffect(() => {
-    try {
-      localStorage.setItem(OPEN_STATE_KEY, String(isInputFocused));
-    } catch {}
+    localStorage.setItem(OPEN_STATE_KEY, String(isInputFocused));
   }, [isInputFocused]);
 
+  /* Autoscroll on new messages */
   useEffect(() => {
     jumpToBottom(deskMessagesRef.current, true);
-    if (showMobileChat) jumpToBottom(mobileMessagesRef.current, true);
-  }, [messages, showMobileChat]);
+    jumpToBottom(mobileMessagesRef.current, true);
+  }, [messages]);
+
+  /* Auto-focus textarea on mount for mobile since intro is gone */
+  useEffect(() => {
+    const isMobile = window.matchMedia("(max-width: 767px)").matches;
+    if (isMobile) {
+      setActivated(true);
+      setIsInputFocused(true);
+      setTimeout(() => textareaRef.current?.focus(), 120);
+    }
+  }, []);
 
   useEffect(() => {
     if (isInputFocused) {
-      const id = window.requestAnimationFrame(() => {
+      const id = requestAnimationFrame(() => {
         jumpToBottom(deskMessagesRef.current, false);
+        jumpToBottom(mobileMessagesRef.current, false);
       });
-      return () => window.cancelAnimationFrame(id);
+      return () => cancelAnimationFrame(id);
     }
   }, [isInputFocused]);
 
-  // === Ask backend if we should show QScore for this history (clears when not allowed)
   async function maybeUpdateQScore(history: { role: "user" | "assistant"; content: string }[]) {
     try {
       const res = await fetch("/api/qscore", {
@@ -279,42 +555,32 @@ export default function Home() {
         body: JSON.stringify({ userId, history }),
       });
 
-      // Treat 204 as “nothing to show”
       if (res.status === 204) {
         setQscore(null);
-        try {
-          localStorage.removeItem(LAST_QSCORE_KEY);
-        } catch {}
+        localStorage.removeItem(LAST_QSCORE_KEY);
         return;
       }
 
       if (!res.ok) return;
-      const data = (await res.json()) as {
-        allowed?: boolean;
-        result?: QScoreResult;
-      };
+      const data = await res.json();
 
       if (data?.allowed && data?.result) {
-        setQscore(data.result);
-        try {
-          localStorage.setItem(LAST_QSCORE_KEY, JSON.stringify(data.result));
-        } catch {}
+        setQscore(data.result as QScoreResult);
+        localStorage.setItem(LAST_QSCORE_KEY, JSON.stringify(data.result));
       } else {
         setQscore(null);
-        try {
-          localStorage.removeItem(LAST_QSCORE_KEY);
-        } catch {}
+        localStorage.removeItem(LAST_QSCORE_KEY);
       }
     } catch {
-      // ignore network errors; leave UI as-is
+      // ignore
     }
   }
 
   const handleSendMessage = async () => {
     if (!input.trim() || isLoading) return;
 
-    const now = Date.now();
     const userText = input.trim();
+    const now = Date.now();
     const userMsg: Message = {
       text: userText,
       id: now,
@@ -323,9 +589,7 @@ export default function Home() {
     };
     const updated = [...messages, userMsg];
     setMessages(updated);
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-    } catch {}
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
@@ -334,82 +598,74 @@ export default function Home() {
 
     try {
       const history = updated.map((m) => ({ role: m.role, content: m.text }));
-      const res = await fetch("/api/chat", {
+      const res = await fetchWithTimeout("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: userText, history }),
-      });
+      }, 30000);
 
       if (!res.ok) {
-        let errMessage = "API error";
-        try {
-          const errorData = (await res.json()) as { error?: string };
-          if (errorData?.error) errMessage = errorData.error;
-        } catch {
-          /* ignore */
-        }
-        throw new Error(errMessage);
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData?.error || "API error");
       }
 
-      const data = (await res.json()) as { response: string };
+      const { response } = await res.json();
+      const ts = Date.now();
       const assistantMsg: Message = {
-        text: data.response,
-        id: now + 1,
-        timestamp: Date.now(),
+        text: response,
+        id: ts,
+        timestamp: ts,
         role: "assistant",
       };
       finalUpdated = [...updated, assistantMsg];
       setMessages(finalUpdated);
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUpdated));
-      } catch {}
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUpdated));
 
-      // Only after assistant responds, ask /api/qscore if we should show a QScore
       const newHistory = finalUpdated.map((m) => ({ role: m.role, content: m.text }));
       await maybeUpdateQScore(newHistory);
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : "Could not get response.";
+    } catch (error: any) {
+      const ts = Date.now();
       const errorMsg: Message = {
-        text: `Error: ${msg}`,
-        id: now + 1,
-        timestamp: Date.now(),
+        text: `Error: ${error?.message || "Could not get response."}`,
+        id: ts,
+        timestamp: ts,
         role: "assistant",
       };
       finalUpdated = [...updated, errorMsg];
       setMessages(finalUpdated);
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUpdated));
-      } catch {}
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUpdated));
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleKeyPress = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      void handleSendMessage();
+      handleSendMessage();
     }
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const val = e.target.value;
-    setInput(val);
+    setInput(e.target.value);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
       textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
     }
   };
 
-  const handleBackgroundClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.target === e.currentTarget || !interfaceRef.current?.contains(e.target as Node)) {
-      setIsInputFocused(false);
-    }
-  };
-
   const handleSlideUp = (e: React.MouseEvent) => {
     e.stopPropagation();
     setIsInputFocused(false);
+  };
+
+  const handleGoSignin = () => {
+    setAuthPromptOpen(false);
+    router.push("/signin");
+  };
+  const handleGoSignup = () => {
+    setAuthPromptOpen(false);
+    router.push("/signup");
   };
 
   const handleLogout = async () => {
@@ -432,13 +688,15 @@ export default function Home() {
     }
   };
 
-  /* ===== Voice call starter → now shows a toast ===== */
   const handleStartVoiceCall = () => {
-    notify("Feature coming soon");
+    openAuthModalNow();
   };
 
   return (
-    <main className="relative min-h-screen bg-black text-white font-sans" onClick={handleBackgroundClick}>
+    <main className="relative min-h-screen bg-black text-white font-sans">
+      {/* 🔊 Hidden audio sink for WebRTC (required for autoplay on mobile) */}
+      <audio ref={remoteAudioRef} className="hidden" autoPlay playsInline />
+
       {/* Background */}
       <div className="fixed inset-0 z-[5] bg-black" />
       <div className="fixed inset-0 z-[7] hidden md:flex items-center justify-center">
@@ -463,60 +721,81 @@ export default function Home() {
       {/* Toast */}
       {toast.open && (
         <div role="status" aria-live="polite" className="fixed top-4 left-1/2 -translate-x-1/2 z-[80]">
-          <div className="px-4 py-2 rounded-xl bg-white/90 text-black shadow-lg border border-black/10">
-            {toast.text}
-          </div>
+          <div className="px-4 py-2 rounded-xl bg-white/90 text-black shadow-lg border border-black/10">{toast.text}</div>
         </div>
       )}
 
       {/* ===== DESKTOP TOP-RIGHT TOOLBAR ===== */}
       <div className="hidden md:flex fixed top-3 right-3 z-[70] gap-2">
+        {/* Voice chat toggle */}
         <button
           type="button"
-          onClick={handleStartVoiceCall}
-          className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/15 bg-white/10 backdrop-blur-md hover:bg-white/15 active:scale-95 transition"
-          title="Start voice call"
+          onClick={() => (voiceOn ? stopVoiceChat() : startVoiceChat())}
+          className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/15 backdrop-blur-md active:scale-95 transition ${voiceOn ? "bg-rose-500/80 text-white" : "bg-white/10 hover:bg-white/15"}`}
+          title={voiceOn ? "End voice" : "Start voice"}
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M22 16.92v2a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 3.18 2 2 0 0 1 4.11 1h2a2 2 0 0 1 2 1.72c.13.98.36 1.94.68 2.86a2 2 0 0 1-.45 2.11L7.09 8.91a16 16 0 0 0 6 6l1.22-1.22a2 2 0 0 1 2.11-.45c.92.32 1.88.55 2.86.68A2 2 0 0 1 22 16.92Z" stroke="white" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          <span className="text-sm font-semibold">Voice call</span>
+          <span className="text-sm font-semibold">{voiceOn ? "End voice" : "Voice chat"}</span>
         </button>
 
+        {/* Logout (kept) */}
         <button
           type="button"
           onClick={handleLogout}
           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/15 bg-white/10 backdrop-blur-md hover:bg-white/15 active:scale-95 transition"
           title="Log out"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M12 2v10" stroke="white" strokeWidth="1.8" strokeLinecap="round"/>
-            <path d="M5.5 5.5a8 8 0 1 0 13 0" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          <span className="text-sm font-semibold">Log out</span>
+          <span className="text-sm font-semibold">log out</span>
         </button>
       </div>
 
       {/* ===== MOBILE: FIXED TOP BAR ===== */}
-      <header className="md:hidden fixed top-0 left-0 right-0 z-[30] bg-black/60 backdrop-blur-xl border-b border-white/10 pt-[calc(env(safe-area-inset-top))]">
-        <div className="flex items-center justify-between px-3 py-3">
+      <header className="md:hidden fixed top-0 left-0 right-0 z-[30] bg-black/60 backdrop-blur-xl border-b border-white/10 pt-2">
+        <div className="flex items-center justify-between px-3 py-3 translate-y-[2%]">
+          {/* Left side: send.png + QUOSSI together */}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              aria-label="Open menu"
+              aria-expanded={mobileMenuOpen}
+              onClick={(e) => {
+                e.stopPropagation();
+                setMobileMenuOpen(true);
+              }}
+              className="inline-flex items-center justify-center w-10 h-10 rounded-xl bg-yellow-400/10 hover:bg-yellow-400/20 active:scale-95 transition overflow-hidden"
+            >
+              <Image
+                src="/send.png"
+                alt="Open menu"
+                width={24}
+                height={24}
+                className="select-none pointer-events-none w-6 h-6 brightness-150 hue-rotate-15 saturate-150"
+                style={{ filter: "invert(76%) sepia(98%) saturate(2378%) hue-rotate(3deg) brightness(104%) contrast(101%)" }}
+              />
+            </button>
+
+            {/* “QUOSSI” now sits beside send.png */}
+            <div className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center">
+              <span className="text-sm font-semibold text-yellow-400 tracking-wide">QUOSSI</span>
+              <span className="text-[11px] font-medium text-yellow-300 mt-[2px] tracking-wide">Always Active</span>
+            </div>
+          </div>
+
+          {/* Right side: Voice icon toggles WebRTC */}
           <button
             type="button"
-            aria-label="Open menu"
-            aria-expanded={mobileMenuOpen}
+            aria-label="Voice"
             onClick={(e) => {
               e.stopPropagation();
-              setMobileMenuOpen(true);
+              setMobileMenuOpen(false);
+              voiceOn ? stopVoiceChat() : startVoiceChat();
             }}
-            className="inline-flex items-center justify-center w-10 h-10 rounded-xl border border-white/15 bg-white/10 active:scale-95 transition"
+            className={`inline-flex items-center justify-center w-10 h-10 rounded-xl ${voiceOn ? "bg-rose-500/80" : "bg-yellow-400/10 hover:bg-yellow-400/20"} active:scale-95 transition`}
           >
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M4 7h16M4 12h16M4 17h16" stroke="white" strokeWidth="1.8" strokeLinecap="round" />
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 14a4 4 0 004-4V7a4 4 0 10-8 0v3a4 4 0 004 4z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 10v1a7 7 0 01-14 0v-1M12 19v3" />
             </svg>
           </button>
-
-          <div className="text-sm font-semibold text-white/90">QUOSSI</div>
-          <div className="w-10 h-10" />
         </div>
       </header>
 
@@ -529,7 +808,7 @@ export default function Home() {
       >
         <div className={`absolute inset-0 bg-black/60 transition-opacity ${mobileMenuOpen ? "opacity-100" : "opacity-0"}`} />
         <nav
-          className={`absolute top-0 left-0 h-full w-[80%] max-w-[320px] bg-[#0B0B0B] border-r border-white/10 pt-[calc(12px+env(safe-area-inset-top))] px-4 pb-[calc(12px+env(safe-area-inset-bottom))] transform transition-transform duration-300 ${
+          className={`absolute top-0 left-0 h-full w-[80%] max-w-[320px] bg-[#0B0B0B] border-r border-white/10 pt-3 px-4 pb-3 transform transition-transform duration-300 ${
             mobileMenuOpen ? "translate-x-0" : "-translate-x-full"
           }`}
           onClick={(e) => e.stopPropagation()}
@@ -552,107 +831,85 @@ export default function Home() {
             <li className="pt-2">
               <button
                 className="w-full text-left px-3 py-3 rounded-lg bg-yellow-400 text-black font-semibold hover:bg-yellow-300"
-                onClick={handleStartVoiceCall}
+                onClick={() => { setMobileMenuOpen(false); voiceOn ? stopVoiceChat() : startVoiceChat(); }}
               >
-                voice call
+                {voiceOn ? "end voice" : "voice chat"}
               </button>
             </li>
           </ul>
 
           <ul className="space-y-1">
             <li className="pt-2">
-              <button
-                className="w-full text-left px-3 py-3 rounded-lg bg-yellow-400 text-black font-semibold hover:bg-yellow-300"
-                onClick={handleLogout}
-              >
-                Log out
+              <button className="w-full text-left px-3 py-3 rounded-lg bg-yellow-400 text-black font-semibold hover:bg-yellow-300" onClick={handleLogout}>
+                log out
               </button>
             </li>
           </ul>
         </nav>
       </div>
 
-      {/* ===== MOBILE CHAT ===== */}
+      {/* ===== MOBILE CHAT (intro removed: always chat) ===== */}
       <section className="md:hidden fixed inset-0 z-[25]">
-        {!showMobileChat ? (
-          // INTRO stays until the button is tapped (no swipe open)
-          <div className="fixed inset-0 min-h-[100dvh] bg-transparent flex flex-col items-center justify-start gap-2 pt-[calc(72px+env(safe-area-inset-top))]">
-            <Image
-              src="/dave2.png"
-              alt="quossi"
-              width={900}
-              height={360}
-              priority
-              className="free-swinging-dave pointer-events-none select-none"
-            />
-            <button
-              onClick={() => setShowMobileChat(true)}
-              className="mt-0 px-5 py-2 rounded-full bg-white/20 border border-white/20 backdrop-blur-md active:scale-95 transition"
-            >
-              whats on your mind?
-            </button>
+        <div className="flex flex-col h-[100dvh] bg-transparent">
+          {/* QScore header (mobile) */}
+          <div className="px-4 pt={[72] + 'px'} pb-2">
+            <QScorePanel q={qscore} />
           </div>
-        ) : (
-          <div className="flex flex-col h-[100dvh] bg-transparent">
-            {/* QScore header (mobile) */}
-            <div className="px-4 pt-[calc(72px+env(safe-area-inset-top))] pb-2">
-              <QScorePanel q={qscore} />
-            </div>
 
-            <div
-              ref={mobileMessagesRef}
-              className="flex-1 overflow-y-auto px-4 pb-[108px] pt-2 space-y-4 overscroll-contain scroll-smooth"
-            >
-              {messages.map((m) => (
-                <MessageBubble key={m.id} m={m} />
-              ))}
-              <div ref={messagesEndRef} />
-              {isLoading && (
-                <div className="flex justify-start space-x-2 items-start">
-                  <div className="flex-shrink-0 w-8 h-8 rounded-full overflow-hidden mr-2 border border-white/30">
-                    <Image src="/send.png" alt="Quossi AI" width={32} height={32} className="object-cover" />
-                  </div>
-                  <div className="bg-yellow-400/90 text-black p-3 rounded-lg max-w-xs border border-black/20 shadow-lg">
-                    typing
-                  </div>
+          {/* Messages */}
+          <div ref={mobileMessagesRef} className="flex-1 overflow-y-auto px-4 pb-[108px] pt-2 space-y-4 overscroll-contain scroll-smooth">
+            {messages.map((m) => (
+              <MessageBubble key={m.id} m={m} />
+            ))}
+            <div ref={messagesEndRef} />
+            {isLoading && (
+              <div className="flex justify-start space-x-2 items-start">
+                <div className="flex-shrink-0 w-8 h-8 rounded-full overflow-hidden mr-2 border border-white/30">
+                  <Image src="/send.png" alt="Quossi AI" width={32} height={32} className="object-cover" />
                 </div>
-              )}
-            </div>
-
-            <div className="sticky bottom-0 left-0 right-0 z-[26] bg-black/70 backdrop-blur-md border-t border-white/10 px-3 pt-2 pb-[calc(10px+env(safe-area-inset-bottom))]">
-              <div className="flex gap-2 items-end">
-                <textarea
-                  ref={textareaRef}
-                  rows={1}
-                  value={input}
-                  onChange={handleInputChange}
-                  onKeyDown={handleKeyPress}
-                  className="flex-1 p-6 rounded-xl bg-white/20 text-white placeholder-white/70 border border-white/20 focus:outline-none focus:ring-2 focus:ring-yellow-400/50 resize-none overflow-hidden min-h-[44px] max-h-[120px]"
-                  placeholder="Type a message…"
-                  disabled={isLoading}
-                  onFocus={() => setIsInputFocused(true)}
-                />
-                <button
-                  type="button"
-                  aria-label="Send message"
-                  disabled={!input.trim() || isLoading}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={handleSendMessage}
-                  className={`grid place-items-center rounded-xl border border-blue-300/20 transition w-12 h-12 ${
-                    input.trim() && !isLoading
-                      ? "bg-blue-500/60 hover:bg-blue-500/70 active:bg-blue-500/80"
-                      : "bg-white/10 opacity-60 cursor-not-allowed"
-                  }`}
-                >
-                  <Image src="/send.png" alt="Send" width={22} height={22} />
-                </button>
+                <div className="bg-yellow-400/90 text-black p-3 rounded-lg max-w-xs border border-black/20 shadow-lg">typing</div>
               </div>
+            )}
+          </div>
+
+          {/* Composer */}
+          <div className="sticky bottom-0 left-0 right-0 z-[26] bg-black/70 backdrop-blur-md border-t border-white/10 px-3 pt-2 pb-3">
+            <div className="flex gap-2 items-end">
+              <textarea
+                ref={textareaRef}
+                rows={1}
+                value={input}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyPress}
+                className="flex-1 p-6 rounded-xl bg-white/20 text-white placeholder-white/70 border border-white/20 focus:outline-none focus:ring-2 focus:ring-yellow-400/50 resize-none overflow-hidden min-h-[44px] max-h-[120px]"
+                placeholder="Type a message…"
+                disabled={isLoading}
+                onFocus={() => {
+                  setIsInputFocused(true);
+                  setActivated(true);
+                }}
+              />
+              <button
+                type="button"
+                aria-label="Send message"
+                disabled={!input.trim() || isLoading}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={handleSendMessage}
+                className={`group relative grid place-items-center rounded-full mb-1 border backdrop-blur-sm transition-all duration-200 w-11 h-11 -translate-y-[8px] ${
+                  input.trim() && !isLoading
+                    ? "border-blue-300/20 bg-blue-500/30 hover:bg-blue-500/40 hover:-translate-y-[10px] active:!bg-black active:!bg-opacity-100 active:!border-black"
+                    : "bg-white/10 opacity-60 cursor-not-allowed border-white/20"
+                }`}
+              >
+                <Image src="/send.png" alt="Send" width={22} height={22} className="select-none" />
+                <span className="pointer-events-auto cursor-pointer absolute inset-0 rounded-full ring-0 group-focus-visible:ring-2 ring-yellow-300/60" />
+              </button>
             </div>
           </div>
-        )}
+        </div>
       </section>
 
-      {/* ===== DESKTOP CHAT ===== */}
+      {/* ===== DESKTOP CHAT (unchanged) ===== */}
       <section
         ref={interfaceRef}
         className={`hidden md:block fixed left-1/2 z-[50] w-full max-w-2xl -translate-x-1/2 px-4 transition-[top,bottom,transform] duration-300 ease-out ${
@@ -670,22 +927,16 @@ export default function Home() {
               setActivated(true);
               setIsInputFocused(true);
               setTimeout(() => textareaRef.current?.focus(), 0);
-              // stay full-height briefly, then dock to bottom
               window.setTimeout(() => setDocked(true), DOCK_DELAY_MS);
             }
           }}
         >
-          {/* soft background pulse */}
-          <div className="absolute inset-0 rounded-2xl bg-gradient-to-r from-[#deddd9] via-[#4a4a49] to-[#000000] opacity-30 blur-xl animate-ping-slow pointer-events-none" />
-
-          {/* Top pull-handle only when revealed */}
           {(isInputFocused || activated) && (
             <div
               className="flex justify-center pt-2 pb-1 cursor-pointer"
               onClick={(e) => {
                 e.stopPropagation();
                 handleSlideUp(e);
-                // when collapsing, send it back to center
                 setDocked(false);
               }}
             >
@@ -693,13 +944,11 @@ export default function Home() {
             </div>
           )}
 
-          {/* -------- HERO (pre-activation) -------- */}
           {!activated && (
             <div className="relative flex-1 grid place-items-center py-10">
               <div className="text-center px-6">
                 <h2 className="text-3xl font-semibold text-white/90 mb-6">Whats on your mind?</h2>
 
-                {/* “Ask anything” CTA using your copy */}
                 <button
                   type="button"
                   onClick={(e) => {
@@ -721,17 +970,14 @@ export default function Home() {
             </div>
           )}
 
-          {/* -------- Chat history + typing area (after activation) -------- */}
           {activated && (
             <>
-              {/* Top section: QScore at the very top of the viewport/panel */}
               {qscore && (
                 <div className="px-4 pt-3 shrink-0">
                   <QScorePanel q={qscore} />
                 </div>
               )}
 
-              {/* Messages fill from top → bottom; own scroll */}
               <div
                 ref={deskMessagesRef}
                 className="relative flex-1 min-h-0 overflow-y-auto p-4 pt-2 space-y-4"
@@ -757,7 +1003,6 @@ export default function Home() {
                 )}
               </div>
 
-              {/* Input docks at the very bottom */}
               <div className="relative p-2 bg-transparent border-t border-white/10 shrink-0">
                 <div className="flex gap-2 items-end">
                   <textarea
@@ -794,6 +1039,33 @@ export default function Home() {
         </div>
       </section>
 
+      {/* ===== Auth popup modal (manual only) ===== */}
+      <AuthPromptModal
+        open={!!authPromptOpen}
+        onClose={() => setAuthPromptOpen(false)}
+        onSignin={handleGoSignin}
+        onSignup={handleGoSignup}
+      />
+
+      {/* ===== QScore card modal (show once) ===== */}
+      {qscoreModalOpen && (
+        <div role="dialog" aria-modal="true" aria-label="Your QScore" className="fixed inset-0 z-[110] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setQscoreModalOpen(false)} />
+          <div className="relative z-[111] w-full h-full md:w-[92%] md:h-[92%] rounded-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setQscoreModalOpen(false)}
+              aria-label="Close QScore"
+              className="absolute top-4 right-4 z-[112] w-10 h-10 grid place-items-center rounded-lg border border-white/20 bg-white/10 hover:bg-white/15 text-white"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18" stroke="white" strokeWidth="1.8" strokeLinecap="round" />
+              </svg>
+            </button>
+            <QScoreBanner />
+          </div>
+        </div>
+      )}
+
       {/* Keyframes & extras */}
       <style jsx global>{`
         @keyframes hoverAnimation {
@@ -807,16 +1079,16 @@ export default function Home() {
           100% { filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.3)); }
         }
         @keyframes yellowGlowAnimation {
-          0% { box-shadow: 0 0 20px rgba(255,215,0,0.3), 0 0 40px rgba(255,215,0,0.2), inset 0 0 20px rgba(255,215,0,0.1); }
-          50% { box-shadow: 0 0 40px rgba(255,215,0,0.6), 0 0 80px rgba(255,215,0,0.4), inset 0 0 40px rgba(255,215,0,0.2); }
-          100% { box-shadow: 0 0 20px rgba(255,215,0,0.3), 0 0 40px rgba(255,215,0,0.2), inset 0 0 20px rgba(255,215,0,0.1); }
+          0% { box-shadow: 0 0 20px rgba(255, 215, 0, 0.3), 0 0 40px rgba(255, 215, 0, 0.2), inset 0 0 20px rgba(255, 215, 0, 0.1); }
+          50% { box-shadow: 0 0 40px rgba(255, 215, 0, 0.6), 0 0 80px rgba(255, 215, 0, 0.4), inset 0 0 40px rgba(255, 215, 0, 0.2); }
+          100% { box-shadow: 0 0 20px rgba(255, 215, 0, 0.3), 0 0 40px rgba(255, 215, 0, 0.2), inset 0 0 20px rgba(255, 215, 0, 0.1); }
         }
         .hover-animation { animation: hoverAnimation 3s ease-in-out infinite; }
         .glow-animation { animation: glowAnimation 2s ease-in-out infinite; }
         .yellow-glow-animation { animation: yellowGlowAnimation 3s ease-in-out infinite; }
 
         .ripple-container { position: absolute; width: 400px; height: 400px; display: flex; align-items: center; justify-content: center; border-radius: 50%; overflow: visible; }
-        .ripple { position: absolute; border: 4px solid rgba(255,255,255,0.4); border-radius: 50%; width: 400px; height: 400px; opacity: 0; animation: rippleWave 4s ease-out infinite; }
+        .ripple { position: absolute; border: 4px solid rgba(255, 255, 255, 0.4); border-radius: 50%; width: 400px; height: 400px; opacity: 0; animation: rippleWave 4s ease-out infinite; }
         .ripple.delay-1 { animation-delay: 1.3s; }
         .ripple.delay-2 { animation-delay: 2.6s; }
         @keyframes rippleWave {
@@ -831,13 +1103,14 @@ export default function Home() {
         }
         .animate-ping-slow { animation: ping-slow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
 
-        @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
-        .animate-fade-in { animation: fade-in .5s ease-out both }
-        @keyframes slide-up { from { transform: translateY(24px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
-        .animate-slide-up { animation: slide-up .28s ease-out both }
+        @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+        .animate-fade-in { animation: fade-in 0.5s ease-out both; }
 
-        .free-swinging-dave { position: relative; animation: freeSwing 3s ease-in-out infinite; transform-origin: top center; will-change: transform; }
-        @keyframes freeSwing { 0%, 100% { transform: rotate(-10deg); } 50% { transform: rotate(10deg); } }
+        @keyframes slide-up {
+          from { transform: translateY(24px); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        .animate-slide-up { animation: slide-up 0.28s ease-out both; }
       `}</style>
     </main>
   );

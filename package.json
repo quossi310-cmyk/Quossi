@@ -6,7 +6,8 @@
     "dev": "next dev --turbopack",
     "build": "next build --turbopack",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:api:quossi": "node scripts/test_quossi_api.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.4",
@@ -14,7 +15,6 @@
     "@capacitor/core": "^7.4.3",
     "@capacitor/ios": "^7.4.4",
     "@capacitor/status-bar": "^7.0.3",
-    "@splinetool/react-spline": "^4.1.0",
     "@supabase/ssr": "^0.7.0",
     "@supabase/supabase-js": "^2.75.1",
     "framer-motion": "^12.23.22",

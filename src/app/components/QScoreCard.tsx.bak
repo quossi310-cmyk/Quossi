@@ -1,0 +1,46 @@
+// components/QScoreBanner.tsx
+export default function QScoreBanner() {
+  return (
+    <main className="relative min-h-screen bg-transparent text-white flex items-center justify-center overflow-hidden">
+      {/* Yellow glow background */}
+      <div className="pointer-events-none absolute inset-0 grid place-items-center">
+        <div className="w-[640px] h-[640px] rounded-full bg-yellow-400/25 blur-[140px]" />
+      </div>
+
+      {/* Card */}
+      <section
+        className="relative w-[min(92vw,520px)] rounded-[28px] bg-[#0b0b0b] text-center p-8 md:p-10
+                   border border-white/5 shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_22px_70px_rgba(0,0,0,0.65)]"
+      >
+        {/* Name */}
+        <h1 className="text-4xl md:text-5xl font-extrabold tracking-wide text-yellow-400">AFX</h1>
+
+        {/* Stats */}
+        <p className="mt-6 text-[17px] md:text-[18px] text-white/90">
+          Composure Level: <span className="font-semibold">73% (High)</span>
+        </p>
+        <p className="mt-1 text-[17px] md:text-[18px] text-white/90">
+          Q-Score: <span className="font-semibold">73 / 100</span>
+        </p>
+
+        {/* Quote */}
+        <p className="mt-7 text-base md:text-lg leading-relaxed text-yellow-300">
+          {'You\'re in the Flow Zone — calm is your edge.'}
+        </p>
+
+        {/* Button */}
+        <button
+          type="button"
+          className="mt-9 inline-flex items-center justify-center rounded-xl px-6 py-3
+                     bg-yellow-400 text-black font-semibold
+                     shadow-[0_8px_24px_rgba(255,215,0,0.35)]
+                     hover:bg-yellow-300 active:translate-y-[1px]
+                     focus-visible:outline focus-visible:outline-2 focus-visible:outline-yellow-200
+                     transition"
+        >
+          View Stat-Chat <span className="ml-2">→</span>
+        </button>
+      </section>
+    </main>
+  );
+}
