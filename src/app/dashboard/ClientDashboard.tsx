@@ -11,6 +11,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { Capacitor } from "@capacitor/core";
 import { StatusBar, Style } from "@capacitor/status-bar";
 
+
 /* ================= QSCORE TYPES ================= */
 type Tone = "positive" | "neutral" | "stressed";
 type Tier = "Ground" | "Flow" | "Gold" | "Sun";
@@ -29,6 +30,8 @@ const STORAGE_KEY = "chat_messages";
 const OPEN_STATE_KEY = "chat_interface_open";
 const UID_KEY = "quossi_user_id";
 const LAST_QSCORE_KEY = "quossi_last_qscore";
+// Limit how many past messages we send to the server (reduces tokens/cost)
+// (chat history trimming removed)
 const QSCORE_CARD_SHOWN_KEY = "quossi_qscore_card_shown";
 
 /* Docking behavior for desktop composer */
@@ -40,7 +43,6 @@ const AUTH_LAST_SHOWN_KEY = "quossi_auth_prompt_last_shown";
 const AUTH_NUDGES_ENABLED = false as const; // << turn off auto popups
 
 /* ==== Realtime voice (model) ==== */
-/** Use the dated preview that matches the sessions API; keep override via env when needed */
 const REALTIME_MODEL =
   process.env.NEXT_PUBLIC_OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview-2024-12-17";
 
@@ -90,7 +92,6 @@ function waitForIceGatheringComplete(pc: RTCPeerConnection): Promise<void> {
       }
     };
     pc.addEventListener("icegatheringstatechange", check);
-    // safety timeout
     setTimeout(() => {
       pc.removeEventListener("icegatheringstatechange", check);
       resolve();
@@ -163,6 +164,101 @@ function QScorePanel({ q }: { q: QScoreResult | null }) {
   );
 }
 
+/* ===== ChatGPT-style pill composer (keeps your colors) ===== */
+function ChatComposer({
+  value,
+  disabled,
+  onChange,
+  onKeyDown,
+  onSend,
+  onPlus,
+  micOn,
+  onMicToggle,
+  textareaRef,
+  loadingDot,
+}: {
+  value: string;
+  disabled?: boolean;
+  onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
+  onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  onSend: () => void;
+  onPlus?: () => void;
+  micOn?: boolean;
+  onMicToggle?: () => void;
+  textareaRef?: React.Ref<HTMLTextAreaElement>;
+  loadingDot?: boolean;
+}) {
+  return (
+    <div
+      className="
+        grid grid-cols-[auto_1fr_auto] items-center gap-3
+        rounded-full border border-white/15 bg-white/10
+        px-3 sm:px-4 py-2 min-h-14 backdrop-blur-md
+      "
+    >
+      {/* + button */}
+      <button
+        type="button"
+        aria-label="New"
+        onClick={onPlus}
+        className="h-10 w-10 grid place-items-center rounded-full border border-white/15 bg-white/10 hover:bg-white/15 active:scale-95 transition"
+      >
+        <span className="text-xl leading-none text-white/80">+</span>
+      </button>
+
+      {/* textarea */}
+       <textarea
+        ref={textareaRef}
+        rows={1}
+        value={value}
+        onChange={onChange}
+        onKeyDown={onKeyDown}
+        placeholder="what's on your mind"
+        className="
+          flex-1 w-full bg-transparent outline-none resize-none
+          placeholder:text-white/70 text-white text-base leading-relaxed py-2
+          overflow-hidden min-h-[44px] max-h-[240px]
+        "
+        disabled={disabled}
+      />
+
+      {/* right controls */}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          aria-label="Voice"
+          onClick={onMicToggle}
+          className={`h-10 w-10 grid place-items-center rounded-full ${
+            micOn ? "bg-rose-500/80" : "hover:bg-white/15 bg-white/10"
+          } active:scale-95 transition`}
+        >
+          <svg viewBox="0 0 24 24" className="h-5 w-5 text-yellow-400" fill="none">
+            <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4Z" stroke="currentColor" strokeWidth="2" />
+            <path d="M19 11a7 7 0 0 1-14 0M12 18v3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          </svg>
+        </button>
+
+        <button
+          type="button"
+          aria-label="Send message"
+          disabled={!value.trim() || disabled}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={onSend}
+          className={`grid place-items-center rounded-full border border-white/15 w-11 h-11 transition ${
+            value.trim() && !disabled
+              ? "bg-yellow-400 text-black hover:bg-yellow-300"
+              : "bg-white/10 opacity-60 cursor-not-allowed"
+          }`}
+        >
+          <Image src="/send.png" alt="Send" width={20} height={20} className="select-none" />
+        </button>
+
+      
+      </div>
+    </div>
+  );
+}
+
 /* ============== AUTH PROMPT MODAL ============== */
 function AuthPromptModal({
   open,
@@ -227,6 +323,191 @@ function AuthPromptModal({
   );
 }
 
+// components/TelegramDrawer.tsx (inline)
+function TelegramDrawer({
+  onVoiceCall,
+  onLogout,
+}: {
+  onVoiceCall?: () => void;
+  onLogout?: () => void;
+}) {
+  const itemsTop = [
+    { label: "Q SCORE", icon: UserIcon },
+    { label: "Daily News", icon: WalletIcon },
+    { isDivider: true as const },
+    { label: "Market tread", icon: UsersIcon },
+    { label: "voice call", icon: PhoneIcon, onClick: onVoiceCall },
+    {
+      label: "Settings",
+      icon: GearIcon,
+      badge: (
+        <span className="ml-auto flex h-5 w-5 items-center justify-center rounded-full bg-sky-500 text-[11px] font-bold">
+          !
+        </span>
+      ),
+    },
+  ];
+
+  const itemsBottom = [
+    { label: "Log out", icon: UserPlusIcon, onClick: onLogout },
+    { label: "Quossi Features", icon: QuestionIcon },
+  ];
+
+  return (
+    <aside className="w-[300px] h-screen bg-[#0e1621] text-white flex flex-col">
+      {/* Header */}
+      <div className="relative p-4 pb-3">
+        {/* Theme toggle */}
+        <button
+          aria-label="Toggle theme"
+          className="absolute right-4 top-4 grid h-8 w-8 place-items-center rounded-full bg-white/10 hover:bg-white/15"
+        >
+          <SunIcon className="h-4 w-4 text-white/90" />
+        </button>
+
+        {/* Avatar + name */}
+        <div className="flex items-center gap-3">
+          <div className="grid h-12 w-12 place-items-center rounded-full bg-[#2b5278] font-bold">KI</div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <p className="truncate font-semibold">Quossi calm</p>
+              <ChevronDown className="h-4 w-4 text-white/60" />
+            </div>
+            <p className="text-white/60 text-sm">always active</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Scrollable menu */}
+      <div className="flex-1 overflow-y-auto">
+        <MenuSection items={itemsTop} />
+        <div className="h-px bg-white/5 my-2" />
+        <MenuSection items={itemsBottom} />
+      </div>
+    </aside>
+  );
+}
+
+function MenuSection({
+  items,
+}: {
+  items: Array<
+    | { label: string; icon: (p: IconProps) => JSX.Element; badge?: React.ReactNode; onClick?: () => void }
+    | { isDivider: true }
+  >;
+}) {
+  return (
+    <nav className="px-2">
+      {items.map((it, idx) =>
+        "isDivider" in it ? (
+          <div key={`div-${idx}`} className="h-px bg-white/5 my-2" />
+        ) : (
+          <button
+            key={it.label}
+            onClick={it.onClick}
+            className="w-full flex items-center gap-3 rounded-lg px-3 py-3 hover:bg-white/5 active:bg-white/10 transition"
+          >
+            <IconFrame>
+              <it.icon className="h-[18px] w-[18px]" />
+            </IconFrame>
+            <span className="text-[15px]">{it.label}</span>
+            {it.badge}
+          </button>
+        )
+      )}
+    </nav>
+  );
+}
+
+function IconFrame({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="grid h-8 w-8 place-items-center rounded-full bg-white/5 text-white/80">
+      {children}
+    </span>
+  );
+}
+
+type IconProps = React.SVGProps<SVGSVGElement>;
+
+function UserIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <path strokeWidth="1.7" d="M12 12c2.8 0 5-2.2 5-5s-2.2-5-5-5-5 2.2-5 5 2.2 5 5 5Z" />
+      <path strokeWidth="1.7" d="M2.5 21.5c1.7-4.2 6-6.5 9.5-6.5s7.8 2.3 9.5 6.5" />
+    </svg>
+  );
+}
+function WalletIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <rect x="3" y="6" width="18" height="12" rx="2.5" strokeWidth="1.7" />
+      <path strokeWidth="1.7" d="M21 10h-5a2 2 0 0 0 0 4h5z" />
+      <circle cx="16.5" cy="12" r="1" fill="currentColor" />
+    </svg>
+  );
+}
+function UsersIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <circle cx="8" cy="8" r="3.5" strokeWidth="1.7" />
+      <path strokeWidth="1.7" d="M1.5 18c1.1-3 4-5 6.5-5s5.4 2 6.5 5" />
+      <circle cx="17.5" cy="9.5" r="2.5" strokeWidth="1.7" />
+      <path strokeWidth="1.7" d="M14.5 18c.6-1.6 2.1-2.9 3.9-3.5" />
+    </svg>
+  );
+}
+function PhoneIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <path strokeWidth="1.7" d="M6 2h6l-2 6 4 4 6-2v6a2 2 0 0 1-2 2c-8 0-14-6-14-14a2 2 0 0 1 2-2Z" />
+    </svg>
+  );
+}
+function GearIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <circle cx="12" cy="12" r="3" strokeWidth="1.7" />
+      <path
+        strokeWidth="1.7"
+        d="M19 12a7 7 0 0 0-.2-1.7l2-1.5-2-3.4-2.3.8A7 7 0 0 0 14 4l-.4-2h-3.2L10 4a7 7 0 0 0-2.5 1.2L5.2 4.4 3.2 7.8l2 1.5A7 7 0 0 0 5 12c0 .6.1 1.2.2 1.7l-2 1.5 2 3.4 2.3-.8A7 7 0 0 0 10 20l.4 2h3.2l.4-2a7 7 0 0 0 2.5-1.2l2.3.8 2-3.4-2-1.5c.1-.5.2-1.1.2-1.7Z"
+      />
+    </svg>
+  );
+}
+function UserPlusIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <circle cx="10" cy="8" r="3.5" strokeWidth="1.7" />
+      <path strokeWidth="1.7" d="M2.5 19.5c1.7-4 5.8-6 9.5-6" />
+      <path strokeWidth="1.7" d="M19 7v6M16 10h6" />
+    </svg>
+  );
+}
+function QuestionIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <path strokeWidth="1.7" d="M12 18v-2.2c0-2.2 3.5-2.3 3.5-5A3.5 3.5 0 0 0 8 9" />
+      <circle cx="12" cy="20" r="1" fill="currentColor" />
+      <circle cx="12" cy="12" r="9" strokeWidth="1.7" />
+    </svg>
+  );
+}
+function SunIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <circle cx="12" cy="12" r="4" strokeWidth="1.7" />
+      <path strokeWidth="1.7" d="M12 1v3m0 16v3M1 12h3m16 0h3M4.2 4.2l2.1 2.1m11.4 11.4 2.1 2.1m0-15.6-2.1 2.1M6.3 17.7 4.2 19.8" />
+    </svg>
+  );
+}
+function ChevronDown(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <path strokeWidth="1.7" d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
 /* ================= MAIN ================= */
 export default function Home() {
   const router = useRouter();
@@ -242,8 +523,6 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // NOTE: removed showMobileChat + intro. Mobile always shows chat now.
-
   const [docked, setDocked] = useState(false);
   const [qscore, setQscore] = useState<QScoreResult | null>(null);
   const [toast, setToast] = useState<{ open: boolean; text: string }>({ open: false, text: "" });
@@ -254,6 +533,7 @@ export default function Home() {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const [voiceOn, setVoiceOn] = useState(false);
+  const greetingSentRef = useRef(false);
 
   function notify(msg: string, ms = 2400) {
     setToast({ open: true, text: msg });
@@ -265,44 +545,12 @@ export default function Home() {
 
   async function startVoiceChat() {
     if (voiceOn) return;
-    // Guard: secure context & media support
     if (typeof window === "undefined" || !navigator.mediaDevices?.getUserMedia) {
       notify("Voice not supported in this browser context.");
       return;
     }
     try {
-      // 1) RTCPeerConnection with STUN
-      const pc = new RTCPeerConnection({
-        iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
-      });
-      pcRef.current = pc;
-
-      // 2) Remote audio -> hidden <audio>
-      pc.ontrack = (e) => {
-        if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = e.streams[0];
-          // attempt to unlock playback immediately (mobile safari)
-          remoteAudioRef.current.play().catch(() => {});
-        }
-      };
-
-      // 3) Mic capture
-      const mic = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      for (const track of mic.getTracks()) pc.addTrack(track, mic);
-
-      // Optional: data channel
-      pc.createDataChannel("oai-events");
-
-      // 4) Local offer
-      const offer = await pc.createOffer({ offerToReceiveAudio: true });
-      await pc.setLocalDescription(offer);
-
-      // 4.5) Wait for ICE gathering to include candidates
-      await waitForIceGatheringComplete(pc);
-
-      // 5) Fetch ephemeral client_secret from our server
+      // Get ephemeral key + TURN servers first
       const sessionResp = await fetchWithTimeout("/api/realtime", { method: "POST" }, 15000);
       if (!sessionResp.ok) {
         const text = await sessionResp.text().catch(() => "");
@@ -310,17 +558,60 @@ export default function Home() {
       }
       const session = await sessionResp.json().catch(() => ({}));
       const ephemeralKey = session?.client_secret?.value;
+      const iceServers: RTCIceServer[] = Array.isArray(session?.ice_servers)
+        ? session.ice_servers
+        : [{ urls: ["stun:stun.l.google.com:19302"] }];
       if (!ephemeralKey) throw new Error("No client_secret returned from /api/realtime");
 
-      // 6) Exchange SDP with OpenAI Realtime (REST SDP flow)
+      const pc = new RTCPeerConnection({ iceServers });
+      pcRef.current = pc;
+
+      pc.ontrack = (e) => {
+        if (remoteAudioRef.current) {
+          remoteAudioRef.current.srcObject = e.streams[0];
+          remoteAudioRef.current.play().catch(() => {});
+        }
+      };
+
+      const mic = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      for (const track of mic.getTracks()) pc.addTrack(track, mic);
+
+      const dc = pc.createDataChannel("oai-events");
+      const sendGreeting = () => {
+        if (greetingSentRef.current || dc.readyState !== "open") return;
+        try {
+          dc.send(
+            JSON.stringify({
+              type: "response.create",
+              response: {
+                modalities: ["audio"],
+                instructions:
+                  "Greet the user briefly as Quossi and confirm the voice line is live. Keep it short and friendly.",
+              },
+            })
+          );
+          greetingSentRef.current = true;
+        } catch {}
+      };
+      dc.onopen = () => {
+        sendGreeting();
+        setTimeout(sendGreeting, 250);
+      };
+
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      await pc.setLocalDescription(offer);
+      await waitForIceGatheringComplete(pc);
+
       const sdpResp = await fetchWithTimeout(
         `https://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`,
         {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${ephemeralKey}`, // ek_...
+            Authorization: `Bearer ${ephemeralKey}`,
             "Content-Type": "application/sdp",
-            "OpenAI-Beta": "realtime=v1", // REQUIRED
+            "OpenAI-Beta": "realtime=v1",
           },
           body: pc.localDescription?.sdp || offer.sdp || "",
         },
@@ -334,6 +625,11 @@ export default function Home() {
 
       const answerSdp = await sdpResp.text();
       await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      pc.oniceconnectionstatechange = () => {
+        if (pc.iceConnectionState === "connected") {
+          setTimeout(sendGreeting, 150);
+        }
+      };
 
       setVoiceOn(true);
       notify(`🎙️ Voice with ${process.env.NEXT_PUBLIC_QUOSSI_NAME ?? "Quossi"} is live`);
@@ -355,7 +651,6 @@ export default function Home() {
     if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
   }
 
-  // Cleanup on unmount & when tab is hidden (prevents zombie mic)
   useEffect(() => {
     const onVis = () => {
       if (document.visibilityState === "hidden") stopVoiceChat();
@@ -365,7 +660,6 @@ export default function Home() {
       document.removeEventListener("visibilitychange", onVis);
       stopVoiceChat();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* === Initialize Capacitor StatusBar: Option A === */
@@ -376,9 +670,7 @@ export default function Home() {
         await StatusBar.setOverlaysWebView({ overlay: false });
         await StatusBar.setStyle({ style: Style.Dark });
         await StatusBar.setBackgroundColor({ color: "#000000" });
-      } catch {
-        // ignore on web or if plugin not installed
-      }
+      } catch {}
     })();
   }, []);
 
@@ -399,54 +691,10 @@ export default function Home() {
     };
   }, []);
 
-  /* Clear any stale "last shown" to avoid surprise re-opens */
+  /* Clear any stale "last shown" */
   useEffect(() => {
     try { localStorage.removeItem(AUTH_LAST_SHOWN_KEY); } catch {}
   }, []);
-
-  /* ===== helper: open auth modal immediately (used by Call icon) ===== */
-  const openAuthModalNow = () => {
-    setAuthPromptOpen(true);
-    try {
-      localStorage.setItem(AUTH_LAST_SHOWN_KEY, String(Date.now()));
-    } catch {}
-  };
-
-  /* ===== (DISABLED) 15-minute auth nudges for unauthenticated users ===== */
-  useEffect(() => {
-    if (!AUTH_NUDGES_ENABLED || isAuthed) return;
-
-    let timeoutId: number | undefined;
-    let intervalId: number | undefined;
-
-    const now = Date.now();
-    const last = Number(localStorage.getItem(AUTH_LAST_SHOWN_KEY) || 0);
-    const elapsed = now - last;
-    const remaining = Math.max(AUTH_INTERVAL_MS - elapsed, 0);
-
-    const show = () => {
-      setAuthPromptOpen(true);
-      localStorage.setItem(AUTH_LAST_SHOWN_KEY, String(Date.now()));
-    };
-
-    timeoutId = window.setTimeout(() => {
-      show();
-      intervalId = window.setInterval(() => {
-        show();
-      }, AUTH_INTERVAL_MS);
-    }, remaining);
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setAuthPromptOpen(false);
-    } as any;
-    window.addEventListener("keydown", onKey as any);
-
-    return () => {
-      if (timeoutId) window.clearTimeout(timeoutId);
-      if (intervalId) window.clearInterval(intervalId);
-      window.removeEventListener("keydown", onKey as any);
-    };
-  }, [isAuthed]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const interfaceRef = useRef<HTMLElement>(null);
@@ -484,7 +732,7 @@ export default function Home() {
     return () => clearInterval(id);
   }, []);
 
-  /* Show QScore card once after 10s on dashboard */
+  /* Show QScore card once after 10s */
   useEffect(() => {
     try {
       const shown = localStorage.getItem(QSCORE_CARD_SHOWN_KEY);
@@ -494,9 +742,7 @@ export default function Home() {
         try { localStorage.setItem(QSCORE_CARD_SHOWN_KEY, "1"); } catch {}
       }, 10000);
       return () => window.clearTimeout(id);
-    } catch {
-      // ignore storage errors
-    }
+    } catch {}
   }, []);
 
   /* Initial QScore calculation once */
@@ -513,7 +759,6 @@ export default function Home() {
       }
     }, 0);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length]);
 
   /* Persist composer open state */
@@ -527,7 +772,7 @@ export default function Home() {
     jumpToBottom(mobileMessagesRef.current, true);
   }, [messages]);
 
-  /* Auto-focus textarea on mount for mobile since intro is gone */
+  /* Auto-focus textarea on mount for mobile */
   useEffect(() => {
     const isMobile = window.matchMedia("(max-width: 767px)").matches;
     if (isMobile) {
@@ -571,9 +816,7 @@ export default function Home() {
         setQscore(null);
         localStorage.removeItem(LAST_QSCORE_KEY);
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   const handleSendMessage = async () => {
@@ -598,11 +841,17 @@ export default function Home() {
 
     try {
       const history = updated.map((m) => ({ role: m.role, content: m.text }));
-      const res = await fetchWithTimeout("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userText, history }),
-      }, 30000);
+      const res = await fetchWithTimeout(
+        "/api/chat",
+        {
+
+          
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: userText, history }),
+        },
+        30000
+      );
 
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
@@ -650,7 +899,10 @@ export default function Home() {
     setInput(e.target.value);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
-      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+      const next = Math.min(textareaRef.current.scrollHeight, 240);
+      textareaRef.current.style.height = `${next}px`;
+      textareaRef.current.style.overflowY =
+        textareaRef.current.scrollHeight > 240 ? "auto" : "hidden";
     }
   };
 
@@ -675,7 +927,6 @@ export default function Home() {
         await supabase.auth.signOut();
       }
     } catch {
-      // ignore
     } finally {
       try {
         localStorage.removeItem(STORAGE_KEY);
@@ -694,7 +945,7 @@ export default function Home() {
 
   return (
     <main className="relative min-h-screen bg-black text-white font-sans">
-      {/* 🔊 Hidden audio sink for WebRTC (required for autoplay on mobile) */}
+      {/* 🔊 Hidden audio sink for WebRTC */}
       <audio ref={remoteAudioRef} className="hidden" autoPlay playsInline />
 
       {/* Background */}
@@ -727,7 +978,6 @@ export default function Home() {
 
       {/* ===== DESKTOP TOP-RIGHT TOOLBAR ===== */}
       <div className="hidden md:flex fixed top-3 right-3 z-[70] gap-2">
-        {/* Voice chat toggle */}
         <button
           type="button"
           onClick={() => (voiceOn ? stopVoiceChat() : startVoiceChat())}
@@ -737,7 +987,6 @@ export default function Home() {
           <span className="text-sm font-semibold">{voiceOn ? "End voice" : "Voice chat"}</span>
         </button>
 
-        {/* Logout (kept) */}
         <button
           type="button"
           onClick={handleLogout}
@@ -751,36 +1000,46 @@ export default function Home() {
       {/* ===== MOBILE: FIXED TOP BAR ===== */}
       <header className="md:hidden fixed top-0 left-0 right-0 z-[30] bg-black/60 backdrop-blur-xl border-b border-white/10 pt-2">
         <div className="flex items-center justify-between px-3 py-3 translate-y-[2%]">
-          {/* Left side: send.png + QUOSSI together */}
+          {/* Left */}
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              aria-label="Open menu"
-              aria-expanded={mobileMenuOpen}
-              onClick={(e) => {
-                e.stopPropagation();
-                setMobileMenuOpen(true);
-              }}
-              className="inline-flex items-center justify-center w-10 h-10 rounded-xl bg-yellow-400/10 hover:bg-yellow-400/20 active:scale-95 transition overflow-hidden"
-            >
-              <Image
-                src="/send.png"
-                alt="Open menu"
-                width={24}
-                height={24}
-                className="select-none pointer-events-none w-6 h-6 brightness-150 hue-rotate-15 saturate-150"
-                style={{ filter: "invert(76%) sepia(98%) saturate(2378%) hue-rotate(3deg) brightness(104%) contrast(101%)" }}
-              />
-            </button>
+          <button
+  type="button"
+  aria-label="Open menu"
+  aria-expanded={mobileMenuOpen}
+  onClick={(e) => {
+    e.stopPropagation();
+    setMobileMenuOpen(true);
+  }}
+  className="relative inline-flex items-center justify-center w-10 h-10 rounded-full bg-yellow-400/10 hover:bg-yellow-400/20 active:scale-95 transition overflow-hidden group"
+>
+  {/* Outer glowing ring */}
+  <span className="absolute inset-0 rounded-full border-2 border-yellow-400/60 group-hover:border-yellow-300/80 animate-pulse" />
 
-            {/* “QUOSSI” now sits beside send.png */}
+  {/* Soft glow behind */}
+  <span className="absolute inset-0 rounded-full blur-md bg-yellow-400/20 group-hover:bg-yellow-400/30 transition" />
+
+  {/* Icon */}
+  <Image
+    src="/send.png"
+    alt="Open menu"
+    width={24}
+    height={24}
+    className="relative z-10 select-none pointer-events-none w-6 h-6 brightness-150 hue-rotate-15 saturate-150"
+    style={{
+      filter:
+        "invert(76%) sepia(98%) saturate(2378%) hue-rotate(3deg) brightness(104%) contrast(101%)",
+    }}
+  />
+</button>
+
+
             <div className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center">
               <span className="text-sm font-semibold text-yellow-400 tracking-wide">QUOSSI</span>
               <span className="text-[11px] font-medium text-yellow-300 mt-[2px] tracking-wide">Always Active</span>
             </div>
           </div>
 
-          {/* Right side: Voice icon toggles WebRTC */}
+          {/* Right: Voice */}
           <button
             type="button"
             aria-label="Voice"
@@ -791,10 +1050,21 @@ export default function Home() {
             }}
             className={`inline-flex items-center justify-center w-10 h-10 rounded-xl ${voiceOn ? "bg-rose-500/80" : "bg-yellow-400/10 hover:bg-yellow-400/20"} active:scale-95 transition`}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 14a4 4 0 004-4V7a4 4 0 10-8 0v3a4 4 0 004 4z" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M19 10v1a7 7 0 01-14 0v-1M12 19v3" />
-            </svg>
+          <svg
+  xmlns="http://www.w3.org/2000/svg"
+  className="w-6 h-6 text-yellow-400"
+  fill="none"
+  viewBox="0 0 24 24"
+  stroke="currentColor"
+  strokeWidth={2}
+>
+  <path
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    d="M2.25 6.75c0 8.284 6.716 15 15 15h1.5A2.25 2.25 0 0021 19.5v-2.25a.75.75 0 00-.75-.75h-3.007a.75.75 0 00-.705.516l-.724 2.172a.75.75 0 01-.696.516 12.035 12.035 0 01-11.27-11.27.75.75 0 01.516-.696l2.172-.724a.75.75 0 00.516-.705V3.75A.75.75 0 007.5 3H5.25A2.25 2.25 0 003 5.25v1.5z"
+  />
+</svg>
+
           </button>
         </div>
       </header>
@@ -807,56 +1077,32 @@ export default function Home() {
         onClick={() => setMobileMenuOpen(false)}
       >
         <div className={`absolute inset-0 bg-black/60 transition-opacity ${mobileMenuOpen ? "opacity-100" : "opacity-0"}`} />
-        <nav
-          className={`absolute top-0 left-0 h-full w-[80%] max-w-[320px] bg-[#0B0B0B] border-r border-white/10 pt-3 px-4 pb-3 transform transition-transform duration-300 ${
+        <div
+          className={`absolute top-0 left-0 h-full transform transition-transform duration-300 ${
             mobileMenuOpen ? "translate-x-0" : "-translate-x-full"
           }`}
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="flex items-center justify-between mb-4">
-            <span className="text-white/80 font-semibold">Menu</span>
-            <button
-              type="button"
-              aria-label="Close menu"
-              onClick={() => setMobileMenuOpen(false)}
-              className="w-10 h-10 grid place-items-center rounded-xl border border-white/15 bg-white/10"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M6 6l12 12M18 6L6 18" stroke="white" strokeWidth="1.8" strokeLinecap="round" />
-              </svg>
-            </button>
-          </div>
-
-          <ul className="space-y-1">
-            <li className="pt-2">
-              <button
-                className="w-full text-left px-3 py-3 rounded-lg bg-yellow-400 text-black font-semibold hover:bg-yellow-300"
-                onClick={() => { setMobileMenuOpen(false); voiceOn ? stopVoiceChat() : startVoiceChat(); }}
-              >
-                {voiceOn ? "end voice" : "voice chat"}
-              </button>
-            </li>
-          </ul>
-
-          <ul className="space-y-1">
-            <li className="pt-2">
-              <button className="w-full text-left px-3 py-3 rounded-lg bg-yellow-400 text-black font-semibold hover:bg-yellow-300" onClick={handleLogout}>
-                log out
-              </button>
-            </li>
-          </ul>
-        </nav>
+          <TelegramDrawer
+            onVoiceCall={() => {
+              setMobileMenuOpen(false);
+              voiceOn ? stopVoiceChat() : startVoiceChat();
+            }}
+            onLogout={() => {
+              setMobileMenuOpen(false);
+              handleLogout();
+            }}
+          />
+        </div>
       </div>
 
-      {/* ===== MOBILE CHAT (intro removed: always chat) ===== */}
+      {/* ===== MOBILE CHAT ===== */}
       <section className="md:hidden fixed inset-0 z-[25]">
         <div className="flex flex-col h-[100dvh] bg-transparent">
-          {/* QScore header (mobile) */}
-          <div className="px-4 pt={[72] + 'px'} pb-2">
+          <div className="px-4 pt-[72px] pb-2">
             <QScorePanel q={qscore} />
           </div>
 
-          {/* Messages */}
           <div ref={mobileMessagesRef} className="flex-1 overflow-y-auto px-4 pb-[108px] pt-2 space-y-4 overscroll-contain scroll-smooth">
             {messages.map((m) => (
               <MessageBubble key={m.id} m={m} />
@@ -872,44 +1118,25 @@ export default function Home() {
             )}
           </div>
 
-          {/* Composer */}
+          {/* Composer (MOBILE) */}
           <div className="sticky bottom-0 left-0 right-0 z-[26] bg-black/70 backdrop-blur-md border-t border-white/10 px-3 pt-2 pb-3">
-            <div className="flex gap-2 items-end">
-              <textarea
-                ref={textareaRef}
-                rows={1}
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyPress}
-                className="flex-1 p-6 rounded-xl bg-white/20 text-white placeholder-white/70 border border-white/20 focus:outline-none focus:ring-2 focus:ring-yellow-400/50 resize-none overflow-hidden min-h-[44px] max-h-[120px]"
-                placeholder="Type a message…"
-                disabled={isLoading}
-                onFocus={() => {
-                  setIsInputFocused(true);
-                  setActivated(true);
-                }}
-              />
-              <button
-                type="button"
-                aria-label="Send message"
-                disabled={!input.trim() || isLoading}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={handleSendMessage}
-                className={`group relative grid place-items-center rounded-full mb-1 border backdrop-blur-sm transition-all duration-200 w-11 h-11 -translate-y-[8px] ${
-                  input.trim() && !isLoading
-                    ? "border-blue-300/20 bg-blue-500/30 hover:bg-blue-500/40 hover:-translate-y-[10px] active:!bg-black active:!bg-opacity-100 active:!border-black"
-                    : "bg-white/10 opacity-60 cursor-not-allowed border-white/20"
-                }`}
-              >
-                <Image src="/send.png" alt="Send" width={22} height={22} className="select-none" />
-                <span className="pointer-events-auto cursor-pointer absolute inset-0 rounded-full ring-0 group-focus-visible:ring-2 ring-yellow-300/60" />
-              </button>
-            </div>
+            <ChatComposer
+              value={input}
+              disabled={isLoading}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyPress}
+              onSend={handleSendMessage}
+              onPlus={() => setActivated(true)}
+              micOn={voiceOn}
+              onMicToggle={() => (voiceOn ? stopVoiceChat() : startVoiceChat())}
+              textareaRef={textareaRef}
+              loadingDot={isLoading}
+            />
           </div>
         </div>
       </section>
 
-      {/* ===== DESKTOP CHAT (unchanged) ===== */}
+      {/* ===== DESKTOP CHAT ===== */}
       <section
         ref={interfaceRef}
         className={`hidden md:block fixed left-1/2 z-[50] w-full max-w-2xl -translate-x-1/2 px-4 transition-[top,bottom,transform] duration-300 ease-out ${
@@ -1003,36 +1230,20 @@ export default function Home() {
                 )}
               </div>
 
+              {/* Composer (DESKTOP) */}
               <div className="relative p-2 bg-transparent border-t border-white/10 shrink-0">
-                <div className="flex gap-2 items-end">
-                  <textarea
-                    ref={textareaRef}
-                    rows={1}
-                    value={input}
-                    onChange={handleInputChange}
-                    onKeyDown={handleKeyPress}
-                    onFocus={() => setIsInputFocused(true)}
-                    className="flex-1 p-3 rounded-lg bg-white/30 text-white placeholder-white/70 border border-white/20 focus:outline-none focus:ring-2 focus:ring-yellow-400/50 resize-none overflow-hidden min-h-[44px] max-h-[100px]"
-                    placeholder="Type a message..."
-                    disabled={isLoading}
-                  />
-
-                  <button
-                    type="button"
-                    aria-label="Send message"
-                    disabled={!input.trim() || isLoading}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={handleSendMessage}
-                    className={`group relative grid place-items-center rounded-lg mb-1 border border-blue-300/20 backdrop-blur-sm transition w-11 h-11 ${
-                      input.trim() && !isLoading
-                        ? "bg-blue-500/30 hover:bg-blue-500/40 active:bg-blue-500/50"
-                        : "bg-white/10 opacity-60 cursor-not-allowed"
-                    }`}
-                  >
-                    <Image src="/send.png" alt="Send" width={45} height={45} className="select-none" />
-                    <span className="pointer-events-auto cursor-pointer absolute inset-0 rounded-lg ring-0 group-focus-visible:ring-2 ring-yellow-300/60" />
-                  </button>
-                </div>
+                <ChatComposer
+                  value={input}
+                  disabled={isLoading}
+                  onChange={handleInputChange}
+                  onKeyDown={handleKeyPress}
+                  onSend={handleSendMessage}
+                  onPlus={() => setActivated(true)}
+                  micOn={voiceOn}
+                  onMicToggle={() => (voiceOn ? stopVoiceChat() : startVoiceChat())}
+                  textareaRef={textareaRef}
+                  loadingDot={isLoading}
+                />
               </div>
             </>
           )}

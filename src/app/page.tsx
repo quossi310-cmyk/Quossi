@@ -4,7 +4,7 @@
 
 import Image from "next/image";
 import React, { useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 /* ================= TYPES ================= */
 type DayBar = {
@@ -70,22 +70,23 @@ function SparkleBackground(): JSX.Element {
     }
 
     function createStars() {
-      const density = Math.round((width * height) / 22000);
+      const density = Math.round((width * height) / 22000); // ~ responsive density
       stars = new Array(density).fill(0).map(() => ({
         x: rand(0, width),
         y: rand(0, height),
         r: rand(0.6, 1.8),
         p: rand(0, Math.PI * 2),
-        s: rand(-0.05, 0.05),
-        t: rand(0.015, 0.035),
-        hue: Math.random() < 0.25 ? 50 + rand(-6, 6) : 0,
+        s: rand(-0.05, 0.05), // slow drift
+        t: rand(0.015, 0.035), // twinkle speed
+        hue: Math.random() < 0.25 ? 50 + rand(-6, 6) : 0, // some warm sparkles
       }));
     }
 
     function drawStar(star: Star) {
-      const twinkle = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(star.p));
+      const twinkle =
+        0.35 + 0.65 * (0.5 + 0.5 * Math.sin(star.p)); // 0.35..1.0
       const alpha = Math.min(1, Math.max(0.1, twinkle));
-
+      // Slight soft glow with two passes
       ctx.globalAlpha = alpha * 0.55;
       ctx.beginPath();
       ctx.arc(star.x, star.y, star.r * 2.2, 0, Math.PI * 2);
@@ -104,13 +105,16 @@ function SparkleBackground(): JSX.Element {
 
       for (let i = 0; i < stars.length; i++) {
         const st = stars[i];
+        // drift
         st.x += st.s;
         st.y += st.s * 0.15;
+        // wrap
         if (st.x < -2) st.x = width + 2;
         if (st.x > width + 2) st.x = -2;
         if (st.y < -2) st.y = height + 2;
         if (st.y > height + 2) st.y = -2;
 
+        // twinkle
         st.p += st.t;
 
         drawStar(st);
@@ -123,6 +127,7 @@ function SparkleBackground(): JSX.Element {
       resize();
       createStars();
 
+      // Draw once if reduced motion; else animate
       if (REDUCED) {
         ctx.clearRect(0, 0, width, height);
         for (const st of stars) drawStar(st);
@@ -138,6 +143,7 @@ function SparkleBackground(): JSX.Element {
     };
     window.addEventListener("resize", onResize);
     const onMQChange = () => {
+      // Re-init if user toggles motion preference
       cancelAnimationFrame(rafId);
       init();
     };
@@ -156,6 +162,7 @@ function SparkleBackground(): JSX.Element {
       aria-hidden
       className="pointer-events-none absolute inset-0 z-0 opacity-90"
       style={{
+        // optional slight vignette via mask for depth
         WebkitMaskImage:
           "radial-gradient(120% 90% at 50% 40%, rgba(0,0,0,1) 55%, rgba(0,0,0,0.75) 75%, rgba(0,0,0,0.45) 100%)",
         maskImage:
@@ -167,33 +174,10 @@ function SparkleBackground(): JSX.Element {
 
 /* ================= PAGE ================= */
 export default function QScorePage(): JSX.Element {
-  const router = useRouter();
-
-  const handleCheck = () => {
-    router.push("/form");
-  };
-
-  const goSignin = () => {
-    // Change this path if your auth route differs:
-    router.push("/signin");
-  };
-
   return (
     <main className="relative overflow-hidden bg-black text-white min-h-screen flex flex-col items-center justify-start px-6 py-10 font-sans">
       {/* Sparkles behind everything */}
       <SparkleBackground />
-
-      {/* ===== Top-right Login button ===== */}
-      <header className="absolute top-4 right-4 z-30">
-        <button
-          onClick={goSignin}
-          aria-label="Log in"
-          className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/15 border border-white/20 hover:border-white/30 backdrop-blur-md text-sm font-medium text-white shadow-sm transition focus:outline-none focus:ring-2 focus:ring-yellow-400/40"
-          title="Log in"
-        >
-          Log in
-        </button>
-      </header>
 
       {/* CONTENT */}
       <div className="relative z-10 w-full flex flex-col items-center">
@@ -223,8 +207,7 @@ export default function QScorePage(): JSX.Element {
           <button
             type="button"
             aria-label="Check your Q-Score"
-            onClick={handleCheck}
-            className="w-full flex justify-between items-center px-5 py-3 bg-gray-800/70 rounded-full border border-gray-700 hover:border-gray-600 transition group shadow-md backdrop-blur-sm focus:outline-none focus:ring-2 focus:ring-yellow-400/40"
+            className="w-full flex justify-between items-center px-5 py-3 bg-gray-800/70 rounded-full border border-gray-700 hover:border-gray-600 transition group shadow-md backdrop-blur-sm"
           >
             <span className="text-gray-300 font-medium">
               Check your Q-Score...
@@ -233,6 +216,14 @@ export default function QScorePage(): JSX.Element {
               Check now
             </span>
           </button>
+          <div className="mt-3 text-center">
+            <Link
+              href="/signin"
+              className="inline-flex items-center justify-center px-4 py-2 rounded-full border border-gray-700 bg-gray-800/40 text-sm text-gray-200 hover:bg-gray-800/60 active:bg-yellow-400 active:text-black active:border-yellow-400 transition-colors"
+            >
+              Login
+            </Link>
+          </div>
         </div>
 
         {/* Bar Chart Panel */}
@@ -266,8 +257,8 @@ export default function QScorePage(): JSX.Element {
       <style jsx global>{`
         /* ========= Ultra-smooth swinging (pendulum-style) ========= */
         .swing-bell {
-          --angle: 10deg;
-          --duration: 3.6s;
+          --angle: 10deg;         /* swing amplitude */
+          --duration: 3.6s;       /* swing speed */
           animation: swing-smooth var(--duration) cubic-bezier(.44,.01,.56,1) infinite;
           transform-origin: 50% 0%;
           will-change: transform;

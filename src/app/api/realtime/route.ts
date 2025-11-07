@@ -1,5 +1,6 @@
 // app/api/realtime/route.ts
 import { NextResponse } from "next/server";
+import { SystemPrompt } from "@/app/lib/systemPrompt";
 
 export async function POST() {
   try {
@@ -22,14 +23,16 @@ export async function POST() {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
+        "OpenAI-Beta": "realtime=v1",
       },
       body: JSON.stringify({
         model,
-        // top-level options:
-        voice: "verse",                 // <- was session.voice (wrong)
-        modalities: ["audio", "text"],  // optional but handy
-        // optional:
-        // instructions: "You are Quossi. Be concise and warm.",
+        // top-level options (sessions API):
+        voice: "verse",
+        modalities: ["audio", "text"],
+        instructions: SystemPrompt,
+        // Enable server VAD so assistant auto-responds after you stop speaking
+        turn_detection: { type: "server_vad", prefix_padding_ms: 300, silence_duration_ms: 600 },
         // expires_in: 600, // seconds (optional)
       }),
     });
@@ -44,9 +47,9 @@ export async function POST() {
     }
 
     const json = text ? JSON.parse(text) : {};
-    // shape is: { id, client_secret: { value, ... }, ... }
+    // shape is: { id, client_secret: { value, ... }, ice_servers: [...], ... }
     return NextResponse.json(
-      { client_secret: json.client_secret },
+      { client_secret: json.client_secret, ice_servers: json.ice_servers },
       { status: 200 }
     );
   } catch (err: any) {

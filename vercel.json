@@ -1,9 +1,8 @@
 {
   "version": 2,
-  "builds": [
-    { "src": "package.json", "use": "@vercel/next@3.10.3" },
-    { "src": "api/**/*.py", "use": "@vercel/python@4.7.0" }
-  ],
+  "functions": {
+    "api/quossi_2_0.py": { "runtime": "python3.11" }
+  },
   "rewrites": [
     { "source": "/api/quossi_2_0", "destination": "/api/quossi_2_0.py" }
   ]
