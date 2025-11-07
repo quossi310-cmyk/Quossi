@@ -1,12 +1,4 @@
 {
-  "version": 2,
-  "functions": {
-    "api/**/*.ts": { "runtime": "nodejs20.x" },
-    "api/**/*.js": { "runtime": "nodejs20.x" },
-    "api/**/*.py": { "runtime": "python3.11" },
-    "src/app/api/**/route.ts": { "runtime": "nodejs20.x" }
-  },
-  "rewrites": [
-    { "source": "/api/quossi_2_0", "destination": "/api/quossi_2_0.py" }
-  ]
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2
 }
