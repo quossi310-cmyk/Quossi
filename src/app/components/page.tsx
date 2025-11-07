@@ -98,17 +98,19 @@ export default function QScoreBanner() {
         </p>
 
         {/* Button */}
-        <button
-          type="button"
-          className="mt-9 inline-flex items-center justify-center rounded-xl px-6 py-3
-                     bg-yellow-400 text-black font-semibold
-                     shadow-[0_8px_24px_rgba(255,215,0,0.35)]
-                     hover:bg-yellow-300 active:translate-y-[1px]
-                     focus-visible:outline focus-visible:outline-2 focus-visible:outline-yellow-200
-                     transition"
-        >
-          View Stat-Chat <span className="ml-2">↗</span>
-        </button>
+    <button
+  type="button"
+  onClick={() => (window.location.href = "/signup")}
+  className="mt-9 inline-flex items-center justify-center rounded-xl px-6 py-3
+             bg-yellow-400 text-black font-semibold
+             shadow-[0_8px_24px_rgba(255,215,0,0.35)]
+             hover:bg-yellow-300 active:translate-y-[1px]
+             focus-visible:outline focus-visible:outline-2 focus-visible:outline-yellow-200
+             transition"
+>
+  View Stat-Chat <span className="ml-2">↗</span>
+</button>
+
       </section>
     </main>
   );

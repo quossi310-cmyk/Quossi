@@ -13,7 +13,7 @@ type Question =
   | { num: string; text: string; type: "select"; options: string[] };
 
 const QUESTIONS: Question[] = [
-  { num: "01", text: "What’s your trading name?", type: "text", placeholder: "Mr white." },
+  { num: "01", text: "What’s your trading name?", type: "text", placeholder: "Mr White" },
   {
     num: "02",
     text: "What kind of trader are you?",
@@ -145,80 +145,72 @@ export default function QScorePage() {
     if (current > 0 && !submitting) setCurrent((i) => i - 1);
   }
 
-  // Submit-only: status check with retry/backoff on transient failures
-  async function submitToPython(cleaned: string[]) {
-    if (submitting) return; // double-submit guard
-    setSubmitting(true);
-    setSubmitError(null);
+  // Fire-and-forget POST to /api/quossi_2_0 (no Python), store results in sessionStorage.
+  async function postSummary(cleaned: string[]) {
+    const tradingName = (cleaned[0] || "").trim() || "default";
+    const user = tradingName.replace(/[^a-zA-Z0-9_\-]/g, "_");
+    const nickname = tradingName;
 
-    // If you use next.config.js basePath, set NEXT_PUBLIC_BASE_PATH to that value.
-    const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+    try {
+      const res = await fetch("/api/quossi_2_0", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-quossi-user": user,
+          "x-quossi-nickname": nickname,
+        },
+        body: JSON.stringify({ answers: cleaned, user, nickname }),
+        keepalive: true,
+      });
 
-    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    const maxAttempts = 3;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 15000);
-      try {
-        const res = await fetch(`${base}/api/quossi_2_0`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ answers: cleaned }),
-          keepalive: true,
-          signal: controller.signal,
-        });
-        clearTimeout(t);
-
-        if (res.ok) {
-          try { sessionStorage.setItem("qscore_answers", JSON.stringify(cleaned)); } catch {}
-          setSubmitting(false);
-          router.push("/signup");
-          return;
-        }
-
-        // Non-retryable client errors
-        if (res.status < 500) {
-          setSubmitError(`Submit failed (HTTP ${res.status} ${res.statusText})`);
-          break;
-        }
-
-        // Retryable server error
-        if (attempt < maxAttempts) {
-          const backoff = Math.min(2000, 500 * Math.pow(2, attempt - 1));
-          const jitter = Math.floor(Math.random() * 200);
-          await sleep(backoff + jitter);
-          continue;
-        } else {
-          setSubmitError(`Submit failed (HTTP ${res.status} ${res.statusText})`);
-        }
-      } catch (e: any) {
-        clearTimeout(t);
-        // Network/timeout -> retry
-        if (attempt < maxAttempts) {
-          const backoff = Math.min(2000, 500 * Math.pow(2, attempt - 1));
-          const jitter = Math.floor(Math.random() * 200);
-          await sleep(backoff + jitter);
-          continue;
-        } else {
-          setSubmitError(e?.message || "Submit failed");
-        }
+      if (res.ok) {
+        const payload = await res.json().catch(() => null);
+        try {
+          sessionStorage.setItem("qscore_result", JSON.stringify(payload));
+        } catch {}
+      } else {
+        // Save a lightweight error so QScoreCard can show a fallback
+        try {
+          sessionStorage.setItem("qscore_error", `HTTP ${res.status} ${res.statusText}`);
+        } catch {}
       }
-      break;
+    } catch (e: any) {
+      try {
+        sessionStorage.setItem("qscore_error", e?.message || "Network error");
+      } catch {}
     }
-    setSubmitting(false);
   }
 
   function next() {
     if (!hasAnswer || submitting) return;
+
     if (current < total - 1) {
       setCurrent((i) => i + 1);
       requestAnimationFrame(() => {
         containerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
       });
     } else {
+      // Final step: stash answers, start POST, and redirect immediately to /qscorecard
       const cleaned = answers.map((a) => (a ?? "").trim());
-      submitToPython(cleaned);
+
+      const tradingName = (cleaned[0] || "").trim() || "default";
+      const user = tradingName.replace(/[^a-zA-Z0-9_\-]/g, "_");
+      const nickname = tradingName;
+
+      try {
+        sessionStorage.setItem("qscore_answers", JSON.stringify(cleaned));
+        sessionStorage.setItem("qscore_user", user);
+        sessionStorage.setItem("qscore_nickname", nickname);
+      } catch {}
+
+      setSubmitting(true);
+      setSubmitError(null);
+
+      // fire and forget (don’t await)
+      postSummary(cleaned);
+
+      // immediate redirect to QScoreCard view
+      router.push("/components");
     }
   }
 

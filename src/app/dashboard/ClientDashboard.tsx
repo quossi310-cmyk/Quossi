@@ -3,7 +3,7 @@
 
 import Image from "next/image";
 import React, { useState, useEffect, useRef } from "react";
-import QScoreBanner from "@/app/components/QScoreCard";
+
 import { useRouter } from "next/navigation";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
