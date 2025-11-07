@@ -1,10 +1,10 @@
 // app/qscore/page.tsx (Next.js App Router)
-// If you're on the Pages Router, use: pages/qscore.tsx
 "use client";
 
 import Image from "next/image";
 import React, { useEffect, useRef } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 /* ================= TYPES ================= */
 type DayBar = {
@@ -83,8 +83,7 @@ function SparkleBackground(): JSX.Element {
     }
 
     function drawStar(star: Star) {
-      const twinkle =
-        0.35 + 0.65 * (0.5 + 0.5 * Math.sin(star.p)); // 0.35..1.0
+      const twinkle = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(star.p)); // 0.35..1.0
       const alpha = Math.min(1, Math.max(0.1, twinkle));
       // Slight soft glow with two passes
       ctx.globalAlpha = alpha * 0.55;
@@ -143,7 +142,6 @@ function SparkleBackground(): JSX.Element {
     };
     window.addEventListener("resize", onResize);
     const onMQChange = () => {
-      // Re-init if user toggles motion preference
       cancelAnimationFrame(rafId);
       init();
     };
@@ -162,7 +160,6 @@ function SparkleBackground(): JSX.Element {
       aria-hidden
       className="pointer-events-none absolute inset-0 z-0 opacity-90"
       style={{
-        // optional slight vignette via mask for depth
         WebkitMaskImage:
           "radial-gradient(120% 90% at 50% 40%, rgba(0,0,0,1) 55%, rgba(0,0,0,0.75) 75%, rgba(0,0,0,0.45) 100%)",
         maskImage:
@@ -174,6 +171,8 @@ function SparkleBackground(): JSX.Element {
 
 /* ================= PAGE ================= */
 export default function QScorePage(): JSX.Element {
+  const router = useRouter();
+
   return (
     <main className="relative overflow-hidden bg-black text-white min-h-screen flex flex-col items-center justify-start px-6 py-10 font-sans">
       {/* Sparkles behind everything */}
@@ -207,7 +206,8 @@ export default function QScorePage(): JSX.Element {
           <button
             type="button"
             aria-label="Check your Q-Score"
-            className="w-full flex justify-between items-center px-5 py-3 bg-gray-800/70 rounded-full border border-gray-700 hover:border-gray-600 transition group shadow-md backdrop-blur-sm"
+            onClick={() => router.push("/form")} // ← Redirect to /form
+            className="w-full flex justify-between items-center px-5 py-3 bg-gray-800/70 rounded-full border border-gray-700 hover:border-gray-600 transition group shadow-md backdrop-blur-sm focus:outline-none focus:ring-2 focus:ring-yellow-400/60"
           >
             <span className="text-gray-300 font-medium">
               Check your Q-Score...
@@ -216,6 +216,7 @@ export default function QScorePage(): JSX.Element {
               Check now
             </span>
           </button>
+
           <div className="mt-3 text-center">
             <Link
               href="/signin"
@@ -239,10 +240,7 @@ export default function QScorePage(): JSX.Element {
                   <div key={d.label} className="flex flex-col items-center flex-1">
                     <div
                       className={`wave-bar w-8 md:w-10 ${colorClass} rounded-t-md`}
-                      style={{
-                        height: `${d.height}px`,
-                        animationDelay: delay,
-                      }}
+                      style={{ height: `${d.height}px`, animationDelay: delay }}
                       aria-label={`${d.label} bar`}
                     />
                     <span className="text-gray-500 text-xs mt-2">{d.label}</span>
@@ -257,8 +255,8 @@ export default function QScorePage(): JSX.Element {
       <style jsx global>{`
         /* ========= Ultra-smooth swinging (pendulum-style) ========= */
         .swing-bell {
-          --angle: 10deg;         /* swing amplitude */
-          --duration: 3.6s;       /* swing speed */
+          --angle: 10deg;
+          --duration: 3.6s;
           animation: swing-smooth var(--duration) cubic-bezier(.44,.01,.56,1) infinite;
           transform-origin: 50% 0%;
           will-change: transform;
@@ -270,7 +268,6 @@ export default function QScorePage(): JSX.Element {
           100% { transform: rotate(calc(var(--angle) * -1)); }
         }
 
-        /* Respect reduced motion */
         @media (prefers-reduced-motion: reduce) {
           .swing-bell { animation: none; transform: none; }
           .wave-bar { animation: none; transform: none; }
