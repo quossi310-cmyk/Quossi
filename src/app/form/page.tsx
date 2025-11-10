@@ -1,4 +1,3 @@
-// app/qscore/page.tsx
 "use client";
 
 import Image from "next/image";
@@ -12,20 +11,20 @@ type Question =
   | { num: string; text: string; type: "textarea"; placeholder?: string }
   | { num: string; text: string; type: "select"; options: string[] };
 
+type QScoreResult = {
+  qScore: number;
+  range: "Storm" | "Ground" | "Flow" | "Gold" | "Sun";
+  archetype: string;
+  reflection: string;
+};
+
 const QUESTIONS: Question[] = [
   { num: "01", text: "What’s your trading name?", type: "text", placeholder: "Mr White" },
   {
     num: "02",
     text: "What kind of trader are you?",
     type: "select",
-    options: [
-      "Scalper",
-      "Day Trader",
-      "Swing Trader",
-      "Position Trader",
-      "Long-Term Investor",
-      "New / Exploring",
-    ],
+    options: ["Scalper","Day Trader","Swing Trader","Position Trader","Long-Term Investor","New / Exploring"],
   },
   {
     num: "03",
@@ -47,13 +46,13 @@ const QUESTIONS: Question[] = [
     num: "07",
     text: "How confident are you in your risk decisions?",
     type: "select",
-    options: ["Very Confident", "Confident", "Sometimes Doubtful", "Rarely Confident", "Always Second-Guessing"],
+    options: ["Very Confident","Confident","Sometimes Doubtful","Rarely Confident","Always Second-Guessing"],
   },
   {
     num: "08",
     text: "What drives you more — fear or curiosity?",
     type: "select",
-    options: ["Pure Curiosity", "Mostly Curiosity", "Balanced (50/50)", "Slightly Fearful", "Mostly Fearful", "Pure Fear"],
+    options: ["Pure Curiosity","Mostly Curiosity","Balanced (50/50)","Slightly Fearful","Mostly Fearful","Pure Fear"],
   },
   { num: "09", text: "What’s your biggest trading regret?", type: "text" },
   { num: "10", text: "What’s your favorite quote or trading philosophy?", type: "text" },
@@ -61,10 +60,43 @@ const QUESTIONS: Question[] = [
     num: "11",
     text: "Pick a mantra:",
     type: "select",
-    options: ["Make the market chase me.", "One A+ setup a day.", "Flat is a position."],
+    options: ["Make the market chase me.","One A+ setup a day.","Flat is a position."],
   },
   { num: "12", text: "What do you believe the market will look like in 5 years?", type: "textarea" },
 ];
+
+/* =============== Helpers: meaningful validation =============== */
+const BANNED_SINGLETONS = new Set([
+  "ok","k","kk","okay","idk","nah","nope","hmm","hmmm","h","na","n/a","none","nil","-","—","--","…","...", "lol","lmao","haha"
+]);
+const BANNED_GIBBERISH = new Set(["asdf","qwerty","qwertz","zxcv","test","testing","123","1234","000","111"]);
+
+function isMeaningfulText(raw: string): boolean {
+  const s = (raw ?? "").replace(/\s+/g, " ").trim();
+  if (!s) return false;
+
+  const lower = s.toLowerCase();
+
+  if (/^[^A-Za-z0-9]+$/u.test(s)) return false;
+  if (/^[\p{Emoji_Presentation}\p{Emoji}\p{Extended_Pictographic}\s]+$/u.test(s)) return false;
+
+  const letters = (s.match(/[A-Za-z]/g) || []).length;
+  if (letters < 2) return false;
+
+  if (BANNED_SINGLETONS.has(lower)) return false;
+  if (BANNED_GIBBERISH.has(lower)) return false;
+
+  const squashed = lower.replace(/\s/g, "");
+  if (/^(.)\1{2,}$/.test(squashed)) return false;
+  if (/^[bcdfghjklmnpqrstvwxyz]{6,}$/i.test(squashed)) return false;
+
+  return true;
+}
+
+function isValidForQuestion(q: Question, value: string | null): boolean {
+  if (q.type === "select") return !!value && value.trim() !== "";
+  return isMeaningfulText(value ?? "");
+}
 
 /* =============== Auto-resizing Textarea =============== */
 function AutoResizeTextarea({
@@ -114,107 +146,133 @@ export default function QScorePage() {
   const [hideImage, setHideImage] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [showInvalidHint, setShowInvalidHint] = useState(false);
+
   const total = QUESTIONS.length;
   const q = QUESTIONS[current];
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   const progressPct = useMemo(() => ((current + 1) / total) * 100, [current, total]);
+  const hasValidAnswer = useMemo(() => isValidForQuestion(q, answers[current]), [answers, current, q]);
 
-  const hasAnswer = useMemo(() => {
-    const v = answers[current];
-    return v !== null && v.toString().trim() !== "";
-  }, [answers, current]);
-
+  /* =============== Handlers =============== */
   function handleSelect(option: string) {
+    if (submitting) return;
     setHideImage(true);
     setAnswers((prev) => {
       const copy = [...prev];
       copy[current] = option.trim();
       return copy;
     });
+    setShowInvalidHint(false);
   }
+
   function handleInputChange(value: string) {
+    if (submitting) return;
     setAnswers((prev) => {
       const copy = [...prev];
       copy[current] = value;
       return copy;
     });
+    if (q.type !== "select") {
+      setShowInvalidHint(!isMeaningfulText(value));
+    } else {
+      setShowInvalidHint(false);
+    }
   }
 
   function back() {
     if (current > 0 && !submitting) setCurrent((i) => i - 1);
   }
 
-  // Fire-and-forget POST to /api/quossi_2_0 (no Python), store results in sessionStorage.
-  async function postSummary(cleaned: string[]) {
+  /* ================== SUBMIT TO /api/qscore-groq ONLY ================== */
+  async function postSummary(cleaned: string[]): Promise<boolean> {
     const tradingName = (cleaned[0] || "").trim() || "default";
     const user = tradingName.replace(/[^a-zA-Z0-9_\-]/g, "_");
     const nickname = tradingName;
 
+    // Save locally for Q-Score card
+    sessionStorage.setItem("qscore_answers", JSON.stringify(cleaned));
+    sessionStorage.setItem("qscore_user", user);
+    sessionStorage.setItem("qscore_nickname", nickname);
+
+    // DEBUG: Confirm correct endpoint
+    console.log("Submitting to /api/qscore-groq → user:", user);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
     try {
-      const res = await fetch("/api/quossi_2_0", {
+      const res = await fetch("/api/qscore-groq", {
         method: "POST",
         headers: {
-          "content-type": "application/json",
+          "Content-Type": "application/json",
           "x-quossi-user": user,
           "x-quossi-nickname": nickname,
         },
         body: JSON.stringify({ answers: cleaned, user, nickname }),
-        keepalive: true,
+        signal: controller.signal,
       });
 
-      if (res.ok) {
-        const payload = await res.json().catch(() => null);
-        try {
-          sessionStorage.setItem("qscore_result", JSON.stringify(payload));
-        } catch {}
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        console.error("API Error:", res.status, errorText);
+        sessionStorage.setItem("qscore_error", `Server error: ${res.status}`);
+        return false;
+      }
+
+      const payload = await res.json();
+
+      if (payload && "qScore" in payload) {
+        sessionStorage.setItem("qscore_result", JSON.stringify(payload));
+        sessionStorage.removeItem("qscore_error");
+        console.log("Q-Score saved to Supabase:", payload);
+        return true;
       } else {
-        // Save a lightweight error so QScoreCard can show a fallback
-        try {
-          sessionStorage.setItem("qscore_error", `HTTP ${res.status} ${res.statusText}`);
-        } catch {}
+        console.error("Invalid response:", payload);
+        sessionStorage.setItem("qscore_error", "Invalid response");
+        return false;
       }
     } catch (e: any) {
-      try {
-        sessionStorage.setItem("qscore_error", e?.message || "Network error");
-      } catch {}
+      clearTimeout(timeout);
+      const msg = e.name === "AbortError" ? "Request timeout" : e.message || "Network error";
+      console.error("Submission failed:", msg);
+      sessionStorage.setItem("qscore_error", msg);
+      return false;
     }
   }
 
-  function next() {
-    if (!hasAnswer || submitting) return;
+  /* ================== NEXT / SUBMIT ================== */
+  const next = async () => {
+    if (!hasValidAnswer || submitting) {
+      if (q.type !== "select") setShowInvalidHint(true);
+      return;
+    }
 
     if (current < total - 1) {
       setCurrent((i) => i + 1);
+      setShowInvalidHint(false);
       requestAnimationFrame(() => {
         containerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
       });
     } else {
-      // Final step: stash answers, start POST, and redirect immediately to /qscorecard
       const cleaned = answers.map((a) => (a ?? "").trim());
-
-      const tradingName = (cleaned[0] || "").trim() || "default";
-      const user = tradingName.replace(/[^a-zA-Z0-9_\-]/g, "_");
-      const nickname = tradingName;
-
-      try {
-        sessionStorage.setItem("qscore_answers", JSON.stringify(cleaned));
-        sessionStorage.setItem("qscore_user", user);
-        sessionStorage.setItem("qscore_nickname", nickname);
-      } catch {}
 
       setSubmitting(true);
       setSubmitError(null);
 
-      // fire and forget (don’t await)
-      postSummary(cleaned);
+      const ok = await postSummary(cleaned);
+      if (!ok) {
+        setSubmitError("Couldn’t submit. Saved locally — we’ll retry on the next page.");
+      }
 
-      // immediate redirect to QScoreCard view
       router.push("/components");
     }
-  }
+  };
 
-  // click outside to show image again
+  /* =============== Effects =============== */
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
@@ -226,18 +284,19 @@ export default function QScorePage() {
     return () => window.removeEventListener("click", handleClickOutside);
   }, []);
 
-  // Enter to advance (not inside textarea)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Enter" || !hasAnswer || submitting) return;
+      if (e.key !== "Enter" || !hasValidAnswer || submitting) return;
       const active = (document.activeElement as HTMLElement) || null;
       if (active && active.tagName === "TEXTAREA") return;
+      e.preventDefault();
       next();
     };
     window.addEventListener("keydown", onKey as any);
     return () => window.removeEventListener("keydown", onKey as any);
-  }, [hasAnswer, submitting]);
+  }, [hasValidAnswer, submitting, next]);
 
+  /* =============== UI =============== */
   return (
     <div className="relative isolate min-h-screen overflow-hidden bg-transparent">
       {/* BACKGROUND */}
@@ -297,8 +356,10 @@ export default function QScorePage() {
                       role="option"
                       aria-selected={selected}
                       onClick={() => handleSelect(o)}
+                      disabled={submitting}
                       className={`w-full cursor-pointer rounded-2xl p-5 text-left text-lg font-medium shadow-md transition-all hover:shadow-lg
-                      ${selected ? "bg-[#ffdd00] text-black font-bold shadow-xl" : "bg-[#1a1a1a] text-white hover:bg-[#252525]"}`}
+                      ${selected ? "bg-[#ffdd00] text-black font-bold shadow-xl" : "bg-[#1a1a1a] text-white hover:bg-[#252525]"}
+                      ${submitting ? "opacity-60 cursor-not-allowed" : ""}`}
                     >
                       {o}
                     </button>
@@ -306,20 +367,23 @@ export default function QScorePage() {
                 })}
             </div>
           ) : (
-            <AutoResizeTextarea
-              value={answers[current] ?? ""}
-              onFocus={() => setHideImage(true)}
-              onChange={handleInputChange}
-              placeholder={(q as any).placeholder ?? "Type here..."}
-              minRows={q.type === "text" ? 1 : 4}
-            />
+            <>
+              <AutoResizeTextarea
+                value={answers[current] ?? ""}
+                onFocus={() => setHideImage(true)}
+                onChange={handleInputChange}
+                placeholder={(q as any).placeholder ?? "Type here..."}
+                minRows={q.type === "text" ? 1 : 4}
+              />
+              {showInvalidHint && (
+                <p className="text-xs text-red-400 -mt-2">
+                  Please enter a <span className="font-semibold">meaningful</span> response (not “ok”, “idk”, random letters, emojis-only, or repeated characters).
+                </p>
+              )}
+            </>
           )}
 
-          {submitError && (
-            <p className="text-red-400 text-sm mt-2">
-              {submitError}
-            </p>
-          )}
+          {submitError && <p className="text-red-400 text-sm mt-2">{submitError}</p>}
         </main>
 
         {/* NAV BUTTONS */}
@@ -336,7 +400,7 @@ export default function QScorePage() {
             <button
               type="button"
               onClick={next}
-              disabled={!hasAnswer || submitting}
+              disabled={!hasValidAnswer || submitting}
               className={`rounded-full px-9 py-3 font-bold shadow-xl transition-all disabled:opacity-40 hover:scale-105
               ${current === total - 1 ? "bg-green-500 text-black" : "bg-[#ffdd00] text-black"}`}
             >

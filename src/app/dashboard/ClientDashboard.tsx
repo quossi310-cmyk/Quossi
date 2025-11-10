@@ -11,7 +11,6 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { Capacitor } from "@capacitor/core";
 import { StatusBar, Style } from "@capacitor/status-bar";
 
-
 /* ================= QSCORE TYPES ================= */
 type Tone = "positive" | "neutral" | "stressed";
 type Tier = "Ground" | "Flow" | "Gold" | "Sun";
@@ -207,7 +206,7 @@ function ChatComposer({
       </button>
 
       {/* textarea */}
-       <textarea
+      <textarea
         ref={textareaRef}
         rows={1}
         value={value}
@@ -252,8 +251,6 @@ function ChatComposer({
         >
           <Image src="/send.png" alt="Send" width={20} height={20} className="select-none" />
         </button>
-
-      
       </div>
     </div>
   );
@@ -323,19 +320,23 @@ function AuthPromptModal({
   );
 }
 
+/* ================= ICONS & DRAWER ================= */
+
 // components/TelegramDrawer.tsx (inline)
 function TelegramDrawer({
   onVoiceCall,
   onLogout,
+  onShareScreen, // NEW
 }: {
   onVoiceCall?: () => void;
   onLogout?: () => void;
+  onShareScreen?: () => void; // NEW
 }) {
   const itemsTop = [
     { label: "Q SCORE", icon: UserIcon },
     { label: "Daily News", icon: WalletIcon },
     { isDivider: true as const },
-    { label: "Market tread", icon: UsersIcon },
+    { label: "Share screen", icon: UsersIcon, onClick: onShareScreen }, // wired
     { label: "voice call", icon: PhoneIcon, onClick: onVoiceCall },
     {
       label: "Settings",
@@ -535,12 +536,67 @@ export default function Home() {
   const [voiceOn, setVoiceOn] = useState(false);
   const greetingSentRef = useRef(false);
 
+  // --- Screen share refs & state ---
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const [screenOn, setScreenOn] = useState(false);
+
   function notify(msg: string, ms = 2400) {
     setToast({ open: true, text: msg });
     // @ts-expect-error store timer id
     window.clearTimeout((notify as any)._t);
     // @ts-expect-error store timer id
     (notify as any)._t = window.setTimeout(() => setToast((t) => ({ ...t, open: false })), ms);
+  }
+
+  // 🧠 How to Use It (Example in a Client Component)
+  // Call startScreenShare() to prompt the user and begin sharing immediately.
+  // If a WebRTC RTCPeerConnection (pcRef) exists, the screen track is attached/replaced.
+  // Call stopScreenShare() to stop.
+  async function startScreenShare() {
+    if (screenOn) return;
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      notify("Screen share not supported in this browser.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 30, width: { ideal: 1920 }, height: { ideal: 1080 }, cursor: "always" },
+        audio: false,
+      });
+      screenStreamRef.current = stream;
+      setScreenOn(true);
+      notify("🟡 Screen sharing started");
+
+      const [videoTrack] = stream.getVideoTracks();
+      if (videoTrack) {
+        videoTrack.addEventListener("ended", () => {
+          stopScreenShare();
+        });
+      }
+
+      const pc = pcRef.current;
+      if (pc && videoTrack) {
+        const existing = pc.getSenders().find((s) => s.track && s.track.kind === "video");
+        if (existing) {
+          await existing.replaceTrack(videoTrack);
+        } else {
+          pc.addTrack(videoTrack, stream);
+        }
+      }
+    } catch (err: any) {
+      notify(`Screen share error: ${err?.message || "permission denied"}`);
+      setScreenOn(false);
+      screenStreamRef.current = null;
+    }
+  }
+
+  function stopScreenShare() {
+    try {
+      screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    } catch {}
+    screenStreamRef.current = null;
+    setScreenOn(false);
+    notify("🟢 Screen sharing ended");
   }
 
   async function startVoiceChat() {
@@ -651,14 +707,23 @@ export default function Home() {
     if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
   }
 
+  // Small helper to open the auth modal (fixes undefined openAuthModalNow)
+  function openAuthModalNow() {
+    setAuthPromptOpen(true);
+  }
+
   useEffect(() => {
     const onVis = () => {
-      if (document.visibilityState === "hidden") stopVoiceChat();
+      if (document.visibilityState === "hidden") {
+        stopVoiceChat();
+        stopScreenShare();
+      }
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       document.removeEventListener("visibilitychange", onVis);
       stopVoiceChat();
+      stopScreenShare();
     };
   }, []);
 
@@ -844,8 +909,6 @@ export default function Home() {
       const res = await fetchWithTimeout(
         "/api/chat",
         {
-
-          
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: userText, history }),
@@ -976,6 +1039,15 @@ export default function Home() {
         </div>
       )}
 
+      {/* Live screen-share pill */}
+      {screenOn && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[85]">
+          <div className="px-3 py-1.5 rounded-full bg-white/95 text-black text-sm font-medium shadow">
+            Sharing screen • <button onClick={stopScreenShare} className="underline">Stop</button>
+          </div>
+        </div>
+      )}
+
       {/* ===== DESKTOP TOP-RIGHT TOOLBAR ===== */}
       <div className="hidden md:flex fixed top-3 right-3 z-[70] gap-2">
         <button
@@ -985,6 +1057,16 @@ export default function Home() {
           title={voiceOn ? "End voice" : "Start voice"}
         >
           <span className="text-sm font-semibold">{voiceOn ? "End voice" : "Voice chat"}</span>
+        </button>
+
+        {/* Optional desktop Share Screen button */}
+        <button
+          type="button"
+          onClick={() => (screenOn ? stopScreenShare() : startScreenShare())}
+          className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-white/15 backdrop-blur-md active:scale-95 transition ${screenOn ? "bg-emerald-500/80 text-white" : "bg-white/10 hover:bg-white/15"}`}
+          title={screenOn ? "Stop sharing" : "Share screen"}
+        >
+          <span className="text-sm font-semibold">{screenOn ? "Stop sharing" : "Share screen"}</span>
         </button>
 
         <button
@@ -1002,36 +1084,33 @@ export default function Home() {
         <div className="flex items-center justify-between px-3 py-3 translate-y-[2%]">
           {/* Left */}
           <div className="flex items-center gap-2">
-          <button
-  type="button"
-  aria-label="Open menu"
-  aria-expanded={mobileMenuOpen}
-  onClick={(e) => {
-    e.stopPropagation();
-    setMobileMenuOpen(true);
-  }}
-  className="relative inline-flex items-center justify-center w-10 h-10 rounded-full bg-yellow-400/10 hover:bg-yellow-400/20 active:scale-95 transition overflow-hidden group"
->
-  {/* Outer glowing ring */}
-  <span className="absolute inset-0 rounded-full border-2 border-yellow-400/60 group-hover:border-yellow-300/80 animate-pulse" />
-
-  {/* Soft glow behind */}
-  <span className="absolute inset-0 rounded-full blur-md bg-yellow-400/20 group-hover:bg-yellow-400/30 transition" />
-
-  {/* Icon */}
-  <Image
-    src="/send.png"
-    alt="Open menu"
-    width={24}
-    height={24}
-    className="relative z-10 select-none pointer-events-none w-6 h-6 brightness-150 hue-rotate-15 saturate-150"
-    style={{
-      filter:
-        "invert(76%) sepia(98%) saturate(2378%) hue-rotate(3deg) brightness(104%) contrast(101%)",
-    }}
-  />
-</button>
-
+            <button
+              type="button"
+              aria-label="Open menu"
+              aria-expanded={mobileMenuOpen}
+              onClick={(e) => {
+                e.stopPropagation();
+                setMobileMenuOpen(true);
+              }}
+              className="relative inline-flex items-center justify-center w-10 h-10 rounded-full bg-yellow-400/10 hover:bg-yellow-400/20 active:scale-95 transition overflow-hidden group"
+            >
+              {/* Outer glowing ring */}
+              <span className="absolute inset-0 rounded-full border-2 border-yellow-400/60 group-hover:border-yellow-300/80 animate-pulse" />
+              {/* Soft glow behind */}
+              <span className="absolute inset-0 rounded-full blur-md bg-yellow-400/20 group-hover:bg-yellow-400/30 transition" />
+              {/* Icon */}
+              <Image
+                src="/send.png"
+                alt="Open menu"
+                width={24}
+                height={24}
+                className="relative z-10 select-none pointer-events-none w-6 h-6 brightness-150 hue-rotate-15 saturate-150"
+                style={{
+                  filter:
+                    "invert(76%) sepia(98%) saturate(2378%) hue-rotate(3deg) brightness(104%) contrast(101%)",
+                }}
+              />
+            </button>
 
             <div className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center">
               <span className="text-sm font-semibold text-yellow-400 tracking-wide">QUOSSI</span>
@@ -1050,21 +1129,20 @@ export default function Home() {
             }}
             className={`inline-flex items-center justify-center w-10 h-10 rounded-xl ${voiceOn ? "bg-rose-500/80" : "bg-yellow-400/10 hover:bg-yellow-400/20"} active:scale-95 transition`}
           >
-          <svg
-  xmlns="http://www.w3.org/2000/svg"
-  className="w-6 h-6 text-yellow-400"
-  fill="none"
-  viewBox="0 0 24 24"
-  stroke="currentColor"
-  strokeWidth={2}
->
-  <path
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    d="M2.25 6.75c0 8.284 6.716 15 15 15h1.5A2.25 2.25 0 0021 19.5v-2.25a.75.75 0 00-.75-.75h-3.007a.75.75 0 00-.705.516l-.724 2.172a.75.75 0 01-.696.516 12.035 12.035 0 01-11.27-11.27.75.75 0 01.516-.696l2.172-.724a.75.75 0 00.516-.705V3.75A.75.75 0 007.5 3H5.25A2.25 2.25 0 003 5.25v1.5z"
-  />
-</svg>
-
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="w-6 h-6 text-yellow-400"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M2.25 6.75c0 8.284 6.716 15 15 15h1.5A2.25 2.25 0 0021 19.5v-2.25a.75.75 0 00-.75-.75h-3.007a.75.75 0 00-.705.516l-.724 2.172a.75.75 0 01-.696.516 12.035 12.035 0 01-11.27-11.27.75.75 0 01.516-.696l2.172-.724a.75.75 0 00.516-.705V3.75A.75.75 0 007.5 3H5.25A2.25 2.25 0 003 5.25v1.5z"
+              />
+            </svg>
           </button>
         </div>
       </header>
@@ -1084,6 +1162,10 @@ export default function Home() {
           onClick={(e) => e.stopPropagation()}
         >
           <TelegramDrawer
+            onShareScreen={() => {
+              setMobileMenuOpen(false);
+              screenOn ? stopScreenShare() : startScreenShare();
+            }}
             onVoiceCall={() => {
               setMobileMenuOpen(false);
               voiceOn ? stopVoiceChat() : startVoiceChat();
@@ -1119,7 +1201,7 @@ export default function Home() {
           </div>
 
           {/* Composer (MOBILE) */}
-          <div className="sticky bottom-0 left-0 right-0 z-[26] bg-black/70 backdrop-blur-md border-t border-white/10 px-3 pt-2 pb-3">
+          <div className=" bottom-0 left-0 right-0 z-[26] bg-black/70 backdrop-blur-md border-t border-white/10 px-3 pt-2 pb-3">
             <ChatComposer
               value={input}
               disabled={isLoading}
