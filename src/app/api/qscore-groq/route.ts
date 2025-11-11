@@ -1,217 +1,105 @@
 // src/app/api/qscore-groq/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import Groq from "groq-sdk";
 import { z } from "zod";
 import { computeQScore } from "@/app/lib/quossiEngine";
-import { supabase } from "@/app/lib/supabase/supabase";  // CORRECT
-import { cookies } from "next/headers"; // For session user
+import { supabase } from "@/app/lib/supabase/supabase";
+import { cookies } from "next/headers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /* ------------------------------------------------------------------ */
-/* 1. Types & Schemas                                                 */
+/* 1) Schemas (support both old and new shapes)                       */
 /* ------------------------------------------------------------------ */
-type QScoreData = {
-  qScore: number;
-  range: string;
-  archetype: string;
-  reflection: string;
-};
-
-type QSummary = {
-  user: string;
-  tone: string;
-  qscore: number;
-  range: {
-    name: string;
-    archetype: string;
-    element?: string;
-    motto: string;
-  };
-  main_qscore: number | null;
-  trend_slope: number;
-  volatility: number | null;
-  streak: { direction: string; length: number };
-  reflection: string;
-};
+const MsgSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string(),
+});
 
 const BodySchema = z.object({
+  // NEW preferred
+  userId: z.string().optional(),
+  history: z.array(MsgSchema).optional(),
+
+  // Back-compat
   answers: z.array(z.string()).optional(),
-  messages: z
-    .array(
-      z.object({
-        role: z.enum(["user", "assistant"]),
-        content: z.string(),
-      })
-    )
-    .optional(),
+  messages: z.array(MsgSchema).optional(),
+
+  // Optional labels
   user: z.string().optional(),
   nickname: z.string().optional(),
 });
 
 /* ------------------------------------------------------------------ */
-/* 2. Helper – get user from cookie or query                          */
+/* 2) Helpers                                                         */
 /* ------------------------------------------------------------------ */
-function getUserId(req: NextRequest): string {
-  // 1. Try cookie (recommended)
-  const cookieUser = cookies().get("qscore_user")?.value;
-  if (cookieUser) return cookieUser;
+async function getUserId(
+  req: NextRequest,
+  body?: z.infer<typeof BodySchema>
+): Promise<string> {
+  // Prefer explicit values first
+  let u =
+    body?.userId ||
+    body?.user ||
+    // headers from client (fallback)
+    req.headers.get("x-quossi-user") ||
+    // cookie (must await cookies())
+    (await cookies()).get("qscore_user")?.value ||
+    // query ?user=
+    new URL(req.url).searchParams.get("user") ||
+    "anonymous";
 
-  // 2. Fallback to query
-  const url = new URL(req.url);
-  const queryUser = url.searchParams.get("user");
-  if (queryUser) return queryUser.replace(/[^a-zA-Z0-9_-]/g, "_");
-
-  // 3. Default
-  return "anonymous";
+  u = u.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return u || "anonymous";
 }
 
-/* ------------------------------------------------------------------ */
-/* 3. Range Map with Element                                          */
-/* ------------------------------------------------------------------ */
-const rangeMap: Record<
-  string,
-  { name: string; archetype: string; element?: string; motto: string }
-> = {
-  Storm: {
-    name: "Storm",
-    archetype: "The Reactor",
-    element: "Fire",
-    motto: "Emotion first, logic later.",
-  },
-  Ground: {
-    name: "Ground",
-    archetype: "The Builder",
-    element: "Earth",
-    motto: "Steady hands make heavy bags.",
-  },
-  Flow: {
-    name: "Flow",
-    archetype: "The Surfer",
-    element: "Water",
-    motto: "Don’t fight the wave — ride it.",
-  },
-  Gold: {
-    name: "Gold",
-    archetype: "The Strategist",
-    element: "Air",
-    motto: "Silence wins faster.",
-  },
-  Sun: {
-    name: "Sun",
-    archetype: "The Oracle",
-    element: "Light",
-    motto: "Peace is the ultimate edge.",
-  },
-};
-
-/* ------------------------------------------------------------------ */
-/* 4. POST – compute + save                                           */
-/* ------------------------------------------------------------------ */
-export async function POST(req: NextRequest) {
-  let body: z.infer<typeof BodySchema>;
-  try {
-    body = BodySchema.parse(await req.json());
-  } catch {
-    return NextResponse.json(
-      { error: "Invalid request", hint: "Send {answers: string[]} or {messages: [...]}." },
-      { status: 400 }
-    );
-  }
-
-  const user = (body.user ?? getUserId(req)).replace(/[^a-zA-Z0-9_-]/g, "_");
-  const messages = normalizeToStrings(body);
-
-  let result: QScoreData;
-
-  if (!messages.length) {
-    result = {
-      qScore: 250,
-      range: "Ground",
-      archetype: "The Builder",
-     reflection: "Say a bit more to calibrate your Q-Score.",
-    };
-  } else {
-    try {
-      const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-      const completion = await groq.chat.completions.create({
-        model: "llama-3.1-70b-versatile",
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: "Return ONLY JSON. Follow rubric." },
-          { role: "user", content: groqPrompt(messages) },
-        ],
-      });
-      const parsed = JSON.parse(completion.choices[0].message.content ?? "{}");
-      if (!isValidResult(parsed)) throw new Error("Invalid Groq output");
-      result = parsed;
-    } catch (err) {
-      console.warn("Groq failed, using fallback:", err);
-      result = computeQScore(messages);
-    }
-  }
-
-  await storeResult(user, result);
-  return NextResponse.json(result);
-}
-
-/* ------------------------------------------------------------------ */
-/* 5. GET – read from Supabase + fallback                             */
-/* ------------------------------------------------------------------ */
-export async function GET(req: NextRequest) {
-  const user = getUserId(req);
-  const raw = await fetchResult(user);
-
-  // Default if no data
-  const defaultSummary: QSummary = {
-    user,
-    tone: "neutral",
-    qscore: 250,
-    range: rangeMap.Ground,
-    main_qscore: 250,
-    trend_slope: 0,
-    volatility: null,
-    streak: { direction: "flat", length: 0 },
-    reflection: "Complete the form to generate your Q-Score.",
-  };
-
-  if (!raw) {
-    return NextResponse.json(defaultSummary);
-  }
-
-  const range = rangeMap[raw.range] ?? rangeMap.Ground;
-
-  const summary: QSummary = {
-    user,
-    tone: "neutral",
-    qscore: raw.qScore,
-    range: { ...range },
-    main_qscore: raw.qScore,
-    trend_slope: 0,
-    volatility: null,
-    streak: { direction: "flat", length: 0 },
-    reflection: raw.reflection,
-  };
-
-  return NextResponse.json(summary);
-}
-
-/* ------------------------------------------------------------------ */
-/* 6. Helpers                                                         */
-/* ------------------------------------------------------------------ */
 function normalizeToStrings(body: z.infer<typeof BodySchema>): string[] {
+  // NEW preferred: history -> only user messages
+  if (body.history && Array.isArray(body.history)) {
+    return body.history
+      .filter((m) => m && m.role === "user" && typeof m.content === "string")
+      .map((m) => m.content.trim())
+      .filter(Boolean);
+  }
+
+  // Back-compat: answers
   if (body.answers && Array.isArray(body.answers)) {
     return body.answers.filter((s): s is string => typeof s === "string" && s.trim() !== "");
   }
+
+  // Back-compat: messages
   if (body.messages && Array.isArray(body.messages)) {
     return body.messages
       .map((m) => m?.content ?? "")
       .filter((s): s is string => typeof s === "string" && s.trim() !== "");
   }
+
   return [];
 }
+
+function isValidResult(r: any): r is {
+  qScore: number;
+  range: string;
+  archetype: string;
+  reflection: string;
+} {
+  return (
+    typeof r?.qScore === "number" &&
+    r.qScore >= 100 &&
+    r.qScore <= 600 &&
+    typeof r?.range === "string" &&
+    typeof r?.archetype === "string" &&
+    typeof r?.reflection === "string"
+  );
+}
+
+const rangeMap = {
+  Storm: { name: "Storm", archetype: "The Reactor", element: "Fire", motto: "Emotion first, logic later." },
+  Ground: { name: "Ground", archetype: "The Builder", element: "Earth", motto: "Steady hands make heavy bags." },
+  Flow:  { name: "Flow",  archetype: "The Surfer",  element: "Water", motto: "Don’t fight the wave — ride it." },
+  Gold:  { name: "Gold",  archetype: "The Strategist", element: "Air",  motto: "Silence wins faster." },
+  Sun:   { name: "Sun",   archetype: "The Oracle", element: "Light", motto: "Peace is the ultimate edge." },
+} as const;
 
 function groqPrompt(messages: string[]) {
   return `
@@ -255,21 +143,19 @@ Reflection:
 `.trim();
 }
 
-async function storeResult(user: string, data: QScoreData) {
+async function storeResult(user: string, data: any) {
   const { error } = await supabase
     .from("qscores")
     .upsert({ user_id: user, data }, { onConflict: "user_id" });
-
   if (error) console.error("Supabase save error:", error);
 }
 
-async function fetchResult(user: string): Promise<QScoreData | null> {
+async function fetchResult(user: string): Promise<any | null> {
   const { data, error } = await supabase
     .from("qscores")
     .select("data")
     .eq("user_id", user)
     .single();
-
   if (error && error.code !== "PGRST116") {
     console.error("Supabase fetch error:", error);
     return null;
@@ -277,13 +163,150 @@ async function fetchResult(user: string): Promise<QScoreData | null> {
   return data?.data || null;
 }
 
-function isValidResult(r: any): r is QScoreData {
-  return (
-    typeof r.qScore === "number" &&
-    r.qScore >= 100 &&
-    r.qScore <= 600 &&
-    typeof r.range === "string" &&
-    typeof r.archetype === "string" &&
-    typeof r.reflection === "string"
-  );
+/* ------------------------------------------------------------------ */
+/* 3) Provider call (xAI Grok or Groq)                                */
+/* ------------------------------------------------------------------ */
+async function callModel(messages: string[]) {
+  const groqKey = process.env.GROQ_API_KEY;
+  const grokKey = process.env.GROK_API_KEY;
+
+  if (!groqKey && !grokKey) {
+    throw new Error("No model key provided. Set GROK_API_KEY (xAI) or GROQ_API_KEY (Groq).");
+  }
+
+  // === Prefer xAI Grok if available (Option B) ===
+  if (grokKey) {
+    const base = process.env.GROK_BASE_URL || "https://api.x.ai/v1";
+    const model = process.env.GROK_MODEL || "grok-2-latest";
+
+    const res = await fetch(`${base}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${grokKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: "Return ONLY JSON. Follow rubric." },
+          { role: "user", content: groqPrompt(messages) },
+        ],
+      }),
+    });
+
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error(`xAI Grok call failed: ${res.status} ${t}`);
+    }
+
+    const data = await res.json();
+    const content =
+      data?.choices?.[0]?.message?.content ??
+      data?.choices?.[0]?.delta?.content ??
+      "";
+
+    const parsed = content ? JSON.parse(content) : null;
+    if (!isValidResult(parsed)) throw new Error("Invalid xAI Grok output");
+    return parsed;
+  }
+
+  // === Groq fallback if you add GROQ_API_KEY ===
+  const { default: Groq } = await import("groq-sdk");
+  const groq = new Groq({ apiKey: groqKey! });
+  const completion = await groq.chat.completions.create({
+    model: "llama-3.1-70b-versatile",
+    temperature: 0,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: "Return ONLY JSON. Follow rubric." },
+      { role: "user", content: groqPrompt(messages) },
+    ],
+  });
+  const parsed = JSON.parse(completion.choices[0].message.content ?? "{}");
+  if (!isValidResult(parsed)) throw new Error("Invalid Groq output");
+  return parsed;
+}
+
+/* ------------------------------------------------------------------ */
+/* 4) POST – compute + save                                           */
+/* ------------------------------------------------------------------ */
+export async function POST(req: NextRequest) {
+  let body: z.infer<typeof BodySchema>;
+  try {
+    body = BodySchema.parse(await req.json());
+  } catch {
+    return NextResponse.json(
+      { error: "Invalid request", hint: "Send {userId, history[]} OR {answers[]} OR {messages[]}." },
+      { status: 400 }
+    );
+  }
+
+  const user = await getUserId(req, body);
+
+  // Persist a cookie for later GETs (7 days)
+  const cookieStore = await cookies();
+  cookieStore.set("qscore_user", user, { path: "/", maxAge: 7 * 24 * 60 * 60 });
+
+  const messages = normalizeToStrings(body);
+
+  let result: { qScore: number; range: string; archetype: string; reflection: string };
+
+  if (!messages.length) {
+    result = {
+      qScore: 250,
+      range: "Ground",
+      archetype: "The Builder",
+      reflection: "Say a bit more to calibrate your Q-Score.",
+    };
+  } else {
+    try {
+      result = await callModel(messages);
+    } catch (err) {
+      console.warn("Model call failed, using fallback:", err);
+      result = computeQScore(messages);
+    }
+  }
+
+  await storeResult(user, result);
+  return NextResponse.json(result);
+}
+
+/* ------------------------------------------------------------------ */
+/* 5) GET – read last summary                                         */
+/* ------------------------------------------------------------------ */
+export async function GET(req: NextRequest) {
+  const user = await getUserId(req);
+  const raw = await fetchResult(user);
+
+  const defaultSummary = {
+    user,
+    tone: "neutral",
+    qscore: 250,
+    range: rangeMap.Ground,
+    main_qscore: 250,
+    trend_slope: 0,
+    volatility: null as number | null,
+    streak: { direction: "flat", length: 0 },
+    reflection: "Complete the form to generate your Q-Score.",
+  };
+
+  if (!raw) return NextResponse.json(defaultSummary);
+
+  const range = (rangeMap as any)[raw.range] ?? rangeMap.Ground;
+
+  const summary = {
+    user,
+    tone: "neutral",
+    qscore: raw.qScore,
+    range: { ...range },
+    main_qscore: raw.qScore,
+    trend_slope: 0,
+    volatility: null as number | null,
+    streak: { direction: "flat", length: 0 },
+    reflection: raw.reflection,
+  };
+
+  return NextResponse.json(summary);
 }

@@ -224,14 +224,7 @@ function SignUpInner() {
               {loading ? "Creating..." : "Sign Up"}
             </button>
 
-            <button
-              type="button"
-              onClick={handleMagicLink}
-              disabled={loading || !email || !envOK}
-              className="px-8 py-3 font-semibold rounded-full border border-white/30 bg-white/10 hover:bg-white/20 transition-all duration-300 disabled:opacity-60"
-            >
-              Send me a magic link
-            </button>
+          
 
             <div className="flex items-center gap-3">
               <div className="h-px flex-1 bg-white/20" />
@@ -248,14 +241,7 @@ function SignUpInner() {
               >
                 Continue with Google
               </button>
-              <button
-                type="button"
-                onClick={() => oauth("github")}
-                disabled={loading || !envOK}
-                className="flex-1 px-4 py-3 font-semibold rounded-full border border-white/30 bg-white/10 hover:bg-white/20 transition-all duration-300 disabled:opacity-60"
-              >
-                GitHub
-              </button>
+             
             </div>
           </form>
 

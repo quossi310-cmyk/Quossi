@@ -183,7 +183,7 @@ export default function QScorePage(): JSX.Element {
         {/* Swinging Logo */}
         <div className="w-[180px] h-[180px] md:w-[220px] md:h-[220px] mb-2 flex items-center justify-center">
           <Image
-            src="/quossi12.png"
+            src="/neww.png"
             alt="Logo"
             width={400}
             height={400}

@@ -185,20 +185,37 @@ export default function QScorePage() {
     if (current > 0 && !submitting) setCurrent((i) => i - 1);
   }
 
-  /* ================== SUBMIT TO /api/qscore-groq ONLY ================== */
-  async function postSummary(cleaned: string[]): Promise<boolean> {
-    const tradingName = (cleaned[0] || "").trim() || "default";
-    const user = tradingName.replace(/[^a-zA-Z0-9_\-]/g, "_");
+  /* ================== SUBMIT TO /api/qscore-groq ONLY (user messages) ================== */
+  async function postSummaryUserOnly(answersRaw: (string | null)[]): Promise<boolean> {
+    // 1) Clean + keep only meaningful user messages
+    const cleaned = (answersRaw ?? [])
+      .map(a => (a ?? "").trim())
+      .filter(s => isMeaningfulText(s));
+
+    if (cleaned.length === 0) {
+      sessionStorage.setItem("qscore_error", "Please provide at least one meaningful answer.");
+      return false;
+    }
+
+    // 2) Derive userId/nickname from Q1 (trading name) or fallback
+    const tradingName = (answersRaw?.[0] ?? "").trim() || "default";
+    const userId = tradingName.replace(/[^a-zA-Z0-9_\-]/g, "_");
     const nickname = tradingName;
 
-    // Save locally for Q-Score card
+    // 3) Persist locally for later UI
     sessionStorage.setItem("qscore_answers", JSON.stringify(cleaned));
-    sessionStorage.setItem("qscore_user", user);
+    sessionStorage.setItem("qscore_user", userId);
     sessionStorage.setItem("qscore_nickname", nickname);
 
-    // DEBUG: Confirm correct endpoint
-    console.log("Submitting to /api/qscore-groq → user:", user);
+    // 4) Build user-only history => [{ role:"user", content }]
+    const history = cleaned.map((content) => ({ role: "user" as const, content }));
 
+    // 5) Set cookie so GET route can read it later
+    try {
+      document.cookie = `qscore_user=${encodeURIComponent(userId)}; Path=/; Max-Age=${7 * 24 * 60 * 60}`;
+    } catch {}
+
+    // 6) Submit to /api/qscore-groq
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
 
@@ -207,28 +224,26 @@ export default function QScorePage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-quossi-user": user,
+          "x-quossi-user": userId,
           "x-quossi-nickname": nickname,
         },
-        body: JSON.stringify({ answers: cleaned, user, nickname }),
+        body: JSON.stringify({ userId, history }), // ← ONLY user messages
         signal: controller.signal,
       });
 
       clearTimeout(timeout);
 
       if (!res.ok) {
-        const errorText = await res.text();
-        console.error("API Error:", res.status, errorText);
+        const t = await res.text().catch(() => "");
+        console.error("API Error:", res.status, t);
         sessionStorage.setItem("qscore_error", `Server error: ${res.status}`);
         return false;
-      }
+    }
 
-      const payload = await res.json();
-
-      if (payload && "qScore" in payload) {
+      const payload = await res.json().catch(() => null);
+      if (payload && typeof payload.qScore === "number") {
         sessionStorage.setItem("qscore_result", JSON.stringify(payload));
         sessionStorage.removeItem("qscore_error");
-        console.log("Q-Score saved to Supabase:", payload);
         return true;
       } else {
         console.error("Invalid response:", payload);
@@ -237,7 +252,7 @@ export default function QScorePage() {
       }
     } catch (e: any) {
       clearTimeout(timeout);
-      const msg = e.name === "AbortError" ? "Request timeout" : e.message || "Network error";
+      const msg = e?.name === "AbortError" ? "Request timeout" : (e?.message || "Network error");
       console.error("Submission failed:", msg);
       sessionStorage.setItem("qscore_error", msg);
       return false;
@@ -258,12 +273,10 @@ export default function QScorePage() {
         containerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
       });
     } else {
-      const cleaned = answers.map((a) => (a ?? "").trim());
-
       setSubmitting(true);
       setSubmitError(null);
 
-      const ok = await postSummary(cleaned);
+      const ok = await postSummaryUserOnly(answers);
       if (!ok) {
         setSubmitError("Couldn’t submit. Saved locally — we’ll retry on the next page.");
       }
