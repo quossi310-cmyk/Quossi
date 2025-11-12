@@ -125,36 +125,9 @@ export default function SignIn() {
                 {loading ? "Signing in..." : "Login"}
               </span>
             </button>
-
-            <button
-              type="button"
-              onClick={magicLink}
-              disabled={loading || !email}
-              className="mt-1 px-6 py-2 rounded-full bg-white/10 border border-white/20 text-white hover:bg-white/15 transition disabled:opacity-50"
-              title={!email ? "Enter your email first" : ""}
-            >
-              Send Magic Link
-            </button>
           </form>
 
-          <div className="mt-6 flex flex-col gap-3">
-            <button
-              type="button"
-              onClick={() => oauth("google")}
-              disabled={loading}
-              className="px-6 py-2 rounded-full bg-white text-black font-medium hover:bg-gray-100 transition disabled:opacity-50"
-            >
-              Continue with Google
-            </button>
-            <button
-              type="button"
-              onClick={() => oauth("github")}
-              disabled={loading}
-              className="px-6 py-2 rounded-full bg-black/70 border border-white/30 text-white hover:bg-black transition disabled:opacity-50"
-            >
-              Continue with GitHub
-            </button>
-          </div>
+          
 
           {msg && <p className="mt-4 text-sm text-yellow-200/90">{msg}</p>}
 

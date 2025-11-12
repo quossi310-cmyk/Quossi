@@ -1,8 +1,7 @@
 // src/lib/supabase/server.ts
-import { cookies } from "next/headers";
-import { createServerClient } from "@supabase/ssr";
-import type { CookieOptions } from "@supabase/ssr";
-
+import 'server-only';
+import { cookies } from 'next/headers';
+import { createServerClient, type CookieOptions } from '@supabase/ssr';
 
 export function createClient() {
   const cookieStore = cookies();
@@ -16,10 +15,21 @@ export function createClient() {
           return cookieStore.get(name)?.value;
         },
         set(name: string, value: string, options: CookieOptions) {
-          cookieStore.set({ name, value, ...options });
+          // ⚠️ Will throw in Server Components; allowed in Route Handlers / Server Actions
+          try {
+            cookieStore.set({ name, value, ...options });
+          } catch {
+            // ignore during RSC render
+          }
         },
         remove(name: string, options: CookieOptions) {
-          cookieStore.set({ name, value: "", ...options });
+          try {
+            // Either approach works:
+            // cookieStore.delete(name);
+            cookieStore.set({ name, value: '', ...options });
+          } catch {
+            // ignore during RSC render
+          }
         },
       },
     }

@@ -43,8 +43,8 @@ async function getUserId(
     body?.user ||
     // headers from client (fallback)
     req.headers.get("x-quossi-user") ||
-    // cookie (must await cookies())
-    (await cookies()).get("qscore_user")?.value ||
+    // cookie (sync, no await)
+    cookies().get("qscore_user")?.value ||
     // query ?user=
     new URL(req.url).searchParams.get("user") ||
     "anonymous";
@@ -77,20 +77,32 @@ function normalizeToStrings(body: z.infer<typeof BodySchema>): string[] {
   return [];
 }
 
-function isValidResult(r: any): r is {
-  qScore: number;
-  range: string;
-  archetype: string;
-  reflection: string;
-} {
-  return (
-    typeof r?.qScore === "number" &&
-    r.qScore >= 100 &&
-    r.qScore <= 600 &&
-    typeof r?.range === "string" &&
-    typeof r?.archetype === "string" &&
-    typeof r?.reflection === "string"
-  );
+// De-dupe near-identical lines so repeated inputs don’t jitter scores
+function normalizedUnique(msgs: string[]) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of msgs) {
+    const k = m.toLowerCase().replace(/\s+/g, " ").trim();
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(m);
+    }
+  }
+  return out;
+}
+
+// Snap score to stable anchors (band midpoints)
+function quantize(q: number) {
+  if (q < 200) return 150;  // Storm
+  if (q < 300) return 250;  // Ground
+  if (q < 400) return 350;  // Flow
+  if (q < 500) return 450;  // Gold
+  return 550;               // Sun
+}
+
+// Smooth between previous and current (EMA)
+function ema(current: number, last: number | null, alpha = 0.3) {
+  return last == null ? current : Math.round(last * (1 - alpha) + current * alpha);
 }
 
 const rangeMap = {
@@ -101,48 +113,85 @@ const rangeMap = {
   Sun:   { name: "Sun",   archetype: "The Oracle", element: "Light", motto: "Peace is the ultimate edge." },
 } as const;
 
-function groqPrompt(messages: string[]) {
-  return `
-You are a scoring function. Return ONLY valid JSON for the user's Q-Score.
+/* ---------------- LLM (reflection only) ---------------- */
+async function callModelReflection(messages: string[], fixed: { qScore: number; range: string; archetype: string }) {
+  const grokKey = process.env.GROK_API_KEY;
+  const groqKey = process.env.GROQ_API_KEY;
 
-## Inputs
-Messages:
+  // If no keys, just return a default reflection
+  if (!grokKey && !groqKey) {
+    return "Keep showing up. Consistency compounds clarity.";
+  }
+
+  // Prefer xAI Grok if available
+  if (grokKey) {
+    const base = process.env.GROK_BASE_URL || "https://api.x.ai/v1";
+    const model = process.env.GROK_MODEL || "grok-2-latest";
+
+    const res = await fetch(`${base}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${grokKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        messages: [
+          { role: "system", content: "Write a single helpful sentence. No JSON. No preface." },
+          {
+            role: "user",
+            content:
+`User messages:
 ${messages.map((m, i) => `[${i + 1}] ${m}`).join("\n")}
 
-## Scoring rubric (MIRROR exactly):
-- Tone: positive (happy|calm|peace|grateful|good|confident), anxious (anxious|worried|nervous|fear|scared), over-confident (angry|mad|frustrated|furious|revenge), else neutral
-- Self-awareness: 1 if /i (noticed|realized|learned|understand|see|reflect)/i
-- Impulse: 1 if /(immediately|couldn’t wait|had to|revenge|all in|double down|panic)/i
+Given:
+- qScore: ${fixed.qScore}
+- range: ${fixed.range}
+- archetype: ${fixed.archetype}
 
-Compute:
-1) stabilityScore = max(0, 1 - (uniqueTonesCount - 1) / 3)
-2) toneScore = (#positive * 1) + (#neutral * 0.8) - (#anxious_or_overconfident * 0.5)
-3) impulseScore = 1 - (impulseCount / messageCount)
-4) selfAwarenessScore = (selfAwareCount / messageCount)
-5) composite = stabilityScore*0.3 + (toneScore/messageCount)*0.3 + selfAwarenessScore*0.25 + impulseScore*0.15
-6) ratio = clamp(composite, 0, 1)
-7) qScore = round(100 + ratio*500)
+Task: Write ONE sentence of encouragement/action aligned with the range.`,
+          },
+        ],
+      }),
+    });
 
-Map:
-100–199 → "Storm", "The Reactor", "Emotion first, logic later."
-200–299 → "Ground", "The Builder", "Steady hands make heavy bags."
-300–399 → "Flow", "The Surfer", "Don’t fight the wave — ride it."
-400–499 → "Gold", "The Strategist", "Silence wins faster."
-500–600 → "Sun", "The Oracle", "Peace is the ultimate edge."
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error(`xAI Grok reflection failed: ${res.status} ${t}`);
+    }
+    const data = await res.json();
+    return data?.choices?.[0]?.message?.content?.trim() || "Stay consistent and keep journaling.";
+  }
 
-Reflection:
-{vibe} — {archetype} energy. {next step}
+  // Groq fallback if available
+  const { default: Groq } = await import("groq-sdk");
+  const groq = new Groq({ apiKey: groqKey! });
+  const completion = await groq.chat.completions.create({
+    model: "llama-3.1-70b-versatile",
+    temperature: 0,
+    messages: [
+      { role: "system", content: "Write a single helpful sentence. No JSON. No preface." },
+      {
+        role: "user",
+        content:
+`User messages:
+${messages.map((m, i) => `[${i + 1}] ${m}`).join("\n")}
 
-## Output JSON (STRICT):
-{
-  "qScore": number,
-  "range": string,
-  "archetype": string,
-  "reflection": string
+Given:
+- qScore: ${fixed.qScore}
+- range: ${fixed.range}
+- archetype: ${fixed.archetype}
+
+Task: Write ONE sentence of encouragement/action aligned with the range.`,
+      },
+    ],
+  });
+
+  return completion.choices?.[0]?.message?.content?.trim() || "Stay consistent and keep journaling.";
 }
-`.trim();
-}
 
+/* ---------------- Persistence ---------------- */
 async function storeResult(user: string, data: any) {
   const { error } = await supabase
     .from("qscores")
@@ -164,73 +213,7 @@ async function fetchResult(user: string): Promise<any | null> {
 }
 
 /* ------------------------------------------------------------------ */
-/* 3) Provider call (xAI Grok or Groq)                                */
-/* ------------------------------------------------------------------ */
-async function callModel(messages: string[]) {
-  const groqKey = process.env.GROQ_API_KEY;
-  const grokKey = process.env.GROK_API_KEY;
-
-  if (!groqKey && !grokKey) {
-    throw new Error("No model key provided. Set GROK_API_KEY (xAI) or GROQ_API_KEY (Groq).");
-  }
-
-  // === Prefer xAI Grok if available (Option B) ===
-  if (grokKey) {
-    const base = process.env.GROK_BASE_URL || "https://api.x.ai/v1";
-    const model = process.env.GROK_MODEL || "grok-2-latest";
-
-    const res = await fetch(`${base}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${grokKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: "Return ONLY JSON. Follow rubric." },
-          { role: "user", content: groqPrompt(messages) },
-        ],
-      }),
-    });
-
-    if (!res.ok) {
-      const t = await res.text().catch(() => "");
-      throw new Error(`xAI Grok call failed: ${res.status} ${t}`);
-    }
-
-    const data = await res.json();
-    const content =
-      data?.choices?.[0]?.message?.content ??
-      data?.choices?.[0]?.delta?.content ??
-      "";
-
-    const parsed = content ? JSON.parse(content) : null;
-    if (!isValidResult(parsed)) throw new Error("Invalid xAI Grok output");
-    return parsed;
-  }
-
-  // === Groq fallback if you add GROQ_API_KEY ===
-  const { default: Groq } = await import("groq-sdk");
-  const groq = new Groq({ apiKey: groqKey! });
-  const completion = await groq.chat.completions.create({
-    model: "llama-3.1-70b-versatile",
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: "Return ONLY JSON. Follow rubric." },
-      { role: "user", content: groqPrompt(messages) },
-    ],
-  });
-  const parsed = JSON.parse(completion.choices[0].message.content ?? "{}");
-  if (!isValidResult(parsed)) throw new Error("Invalid Groq output");
-  return parsed;
-}
-
-/* ------------------------------------------------------------------ */
-/* 4) POST – compute + save                                           */
+/* 4) POST – deterministic score + (quantize + smooth) + reflection   */
 /* ------------------------------------------------------------------ */
 export async function POST(req: NextRequest) {
   let body: z.infer<typeof BodySchema>;
@@ -245,32 +228,58 @@ export async function POST(req: NextRequest) {
 
   const user = await getUserId(req, body);
 
-  // Persist a cookie for later GETs (7 days)
-  const cookieStore = await cookies();
-  cookieStore.set("qscore_user", user, { path: "/", maxAge: 7 * 24 * 60 * 60 });
+  // Normalize inputs
+  const rawMsgs = normalizeToStrings(body);
+  const messages = normalizedUnique(rawMsgs);
 
-  const messages = normalizeToStrings(body);
+  // Deterministic local score
+  let result = computeQScore(messages); // { qScore, range, archetype, reflection? }
 
-  let result: { qScore: number; range: string; archetype: string; reflection: string };
+  // Quantize to band anchors
+  result.qScore = quantize(result.qScore);
 
-  if (!messages.length) {
-    result = {
-      qScore: 250,
-      range: "Ground",
-      archetype: "The Builder",
-      reflection: "Say a bit more to calibrate your Q-Score.",
-    };
-  } else {
-    try {
-      result = await callModel(messages);
-    } catch (err) {
-      console.warn("Model call failed, using fallback:", err);
-      result = computeQScore(messages);
+  // Smooth with previous score
+  const previous = await fetchResult(user);
+  result.qScore = ema(result.qScore, previous?.qScore ?? null);
+
+  // Re-derive range/archetype from quantized score (safety net)
+  const q = result.qScore;
+  const band =
+    q < 200 ? "Storm" :
+    q < 300 ? "Ground" :
+    q < 400 ? "Flow" :
+    q < 500 ? "Gold" : "Sun";
+
+  result.range = band;
+  result.archetype = (rangeMap as any)[band]?.archetype ?? "The Builder";
+
+  // Ask LLM ONLY for reflection (optional)
+  try {
+    const reflection = await callModelReflection(messages, {
+      qScore: result.qScore,
+      range: result.range,
+      archetype: result.archetype,
+    });
+    result.reflection = reflection || result.reflection || "Keep going.";
+  } catch (e) {
+    console.warn("Reflection model failed; keeping local/default reflection:", e);
+    if (!result.reflection) {
+      result.reflection = "Keep going.";
     }
   }
 
+  // Persist
   await storeResult(user, result);
-  return NextResponse.json(result);
+
+  // Build response and set cookie here (Route Handlers require setting on the response)
+  const res = NextResponse.json(result);
+  res.cookies.set("qscore_user", user, {
+    path: "/",
+    maxAge: 7 * 24 * 60 * 60,
+    sameSite: "lax",
+    // httpOnly: true, // turn on if you don't need client JS to read it
+  });
+  return res;
 }
 
 /* ------------------------------------------------------------------ */

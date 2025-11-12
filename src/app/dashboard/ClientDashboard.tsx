@@ -16,11 +16,15 @@ type Tone = "positive" | "neutral" | "stressed";
 type Tier = "Ground" | "Flow" | "Gold" | "Sun";
 type QScoreResult = { tone: Tone; qScore: number; tier: Tier; task: string; runAt: string };
 
+// 🆕 extend Message with image fields + status
 interface Message {
   id: number;
   text: string;
   timestamp: number;
   role: "user" | "assistant";
+  imageUrl?: string;       // final public URL from Supabase
+  imagePreview?: string;   // base64 optimistic preview
+  status?: "sending" | "sent" | "error" | "uploading";
 }
 
 /* ================= CONSTANTS ================= */
@@ -115,10 +119,26 @@ function MessageBubble({ m }: { m: Message }) {
         }`}
         title={new Date(m.timestamp).toString()}
       >
-        <div>{m.text}</div>
+        {/* 🆕 image preview/final */}
+        {(m.imagePreview || m.imageUrl) && (
+          <div className="mb-2 overflow-hidden rounded-md">
+            {m.imageUrl ? (
+              <img src={m.imageUrl} alt="uploaded" className="max-w-full h-auto" />
+            ) : (
+              <img src={m.imagePreview} alt="preview" className="max-w-full h-auto opacity-90" />
+            )}
+          </div>
+        )}
+
+        {/* text (optional) */}
+        {m.text && <div>{m.text}</div>}
+
         <div className={`mt-1 text-[11px] leading-none ${m.role === "user" ? "text-white/70" : "text-black/70"}`}>
           {new Date(m.timestamp).toLocaleDateString(undefined, { day: "2-digit", month: "short" })} •{" "}
           {new Date(m.timestamp).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false })}
+          {/* 🆕 status chips */}
+          {m.status === "uploading" && " • uploading…"}
+          {m.status === "error" && " • upload failed"}
         </div>
       </div>
       {m.role === "user" && (
@@ -205,18 +225,28 @@ function ChatComposer({
         <span className="text-xl leading-none text-white/80">+</span>
       </button>
 
-      {/* textarea */}
+      {/* textarea (auto-grow up to ~6 lines) */}
       <textarea
         ref={textareaRef}
         rows={1}
         value={value}
-        onChange={onChange}
+        onChange={(e) => {
+          onChange(e);
+          const el = e.target;
+          el.style.height = "auto";
+          const line = parseInt(getComputedStyle(el).lineHeight || "20", 10) || 20;
+          const maxHeight = line * 6;
+          const nextHeight = Math.min(el.scrollHeight, maxHeight);
+          el.style.height = `${nextHeight}px`;
+          el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+        }}
         onKeyDown={onKeyDown}
         placeholder="what's on your mind"
         className="
           flex-1 w-full bg-transparent outline-none resize-none
           placeholder:text-white/70 text-white text-base leading-relaxed py-2
-          overflow-hidden min-h-[44px] max-h-[240px]
+          overflow-hidden min-h-[44px]
+          transition-[height] duration-150 ease-in-out
         "
         disabled={disabled}
       />
@@ -326,17 +356,19 @@ function AuthPromptModal({
 function TelegramDrawer({
   onVoiceCall,
   onLogout,
-  onShareScreen, // NEW
+  onShareScreen,
+  onOpenComponents, // ✅ NEW: handler for Q SCORE
 }: {
   onVoiceCall?: () => void;
   onLogout?: () => void;
-  onShareScreen?: () => void; // NEW
+  onShareScreen?: () => void;
+  onOpenComponents?: () => void; // ✅ NEW
 }) {
   const itemsTop = [
-    { label: "Q SCORE", icon: UserIcon },
+    { label: "Q SCORE", icon: UserIcon, onClick: onOpenComponents }, // ✅ wired
     { label: "Daily News", icon: WalletIcon },
     { isDivider: true as const },
-    { label: "Share screen", icon: UsersIcon, onClick: onShareScreen }, // wired
+    { label: "Share screen", icon: UsersIcon, onClick: onShareScreen },
     { label: "voice call", icon: PhoneIcon, onClick: onVoiceCall },
     {
       label: "Settings",
@@ -368,7 +400,13 @@ function TelegramDrawer({
 
         {/* Avatar + name */}
         <div className="flex items-center gap-3">
-          <div className="grid h-12 w-12 place-items-center rounded-full bg-[#2b5278] font-bold">KI</div>
+          <div className="h-12 w-12 overflow-hidden rounded-full bg-[#2b5278]">
+            <img
+              src="/send.png"
+              alt="Profile"
+              className="h-full w-full object-cover"
+            />
+          </div>
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
               <p className="truncate font-semibold">Quossi calm</p>
@@ -509,6 +547,20 @@ function ChevronDown(props: IconProps) {
   );
 }
 
+/* ====== Tiny inline fallback for QScoreBanner (prevents ReferenceError) ====== */
+function QScoreBanner() {
+  return (
+    <div className="w-full h-full grid place-items-center bg-gradient-to-br from-yellow-300/10 to-white/5 text-white">
+      <div className="text-center px-6">
+        <h2 className="text-2xl font-semibold mb-2">Your Q-Score</h2>
+        <p className="text-white/70 max-w-md">
+          This is a placeholder for <code>QScoreBanner</code>. Replace with your full component when ready.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /* ================= MAIN ================= */
 export default function Home() {
   const router = useRouter();
@@ -516,6 +568,7 @@ export default function Home() {
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  // ✅ Fixed the stray "the" token below
   const [isInputFocused, setIsInputFocused] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem(OPEN_STATE_KEY) === "true";
@@ -540,12 +593,83 @@ export default function Home() {
   const screenStreamRef = useRef<MediaStream | null>(null);
   const [screenOn, setScreenOn] = useState(false);
 
+  // 🆕 file input ref for image uploads
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
   function notify(msg: string, ms = 2400) {
     setToast({ open: true, text: msg });
     // @ts-expect-error store timer id
     window.clearTimeout((notify as any)._t);
     // @ts-expect-error store timer id
     (notify as any)._t = window.setTimeout(() => setToast((t) => ({ ...t, open: false })), ms);
+  }
+
+  // 🆕 helpers for image handling
+  function fileToBase64(file: File) {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = reject;
+      reader.onload = () => resolve(reader.result as string);
+      reader.readAsDataURL(file);
+    });
+  }
+  function extFromMime(mime: string) {
+    if (mime.includes("png")) return "png";
+    if (mime.includes("jpeg") || mime.includes("jpg")) return "jpg";
+    if (mime.includes("gif")) return "gif";
+    if (mime.includes("webp")) return "webp";
+    return "bin";
+  }
+
+  // 🆕 central image upload handler
+  async function handleFiles(files: FileList | null) {
+    const file = files?.[0];
+    if (!file) return;
+
+    // 1) optimistic preview message
+    const base64 = await fileToBase64(file);
+    const now = Date.now();
+    const optimistic: Message = {
+      id: now,
+      role: "user",
+      text: "",
+      timestamp: now,
+      imagePreview: base64,
+      status: "uploading",
+    };
+    const withPreview = [...messages, optimistic];
+    setMessages(withPreview);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(withPreview));
+
+    // 2) upload to Supabase Storage
+    try {
+      if (!supabase) throw new Error("Supabase client not available");
+      const path = `user_${userId}_${now}.${extFromMime(file.type)}`;
+
+      const { data: up, error: upErr } = await supabase.storage
+        .from("chat_uploads") // ensure this public bucket exists
+        .upload(path, file, { cacheControl: "3600", contentType: file.type, upsert: false });
+
+      if (upErr) throw upErr;
+
+      const { data: pub } = supabase.storage.from("chat_uploads").getPublicUrl(up!.path);
+      const publicUrl = pub.publicUrl;
+
+      // 3) swap preview → final URL
+      const finalized = withPreview.map((m) =>
+        m.id === now ? { ...m, imagePreview: undefined, imageUrl: publicUrl, status: "sent" } : m
+      );
+      setMessages(finalized);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(finalized));
+    } catch (e: any) {
+      console.error(e);
+      const errored = withPreview.map((m) =>
+        m.id === now ? { ...m, status: "error" } : m
+      );
+      setMessages(errored);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(errored));
+      notify(`Upload failed: ${e?.message || "unknown error"}`);
+    }
   }
 
   // 🧠 How to Use It (Example in a Client Component)
@@ -905,6 +1029,7 @@ export default function Home() {
     let finalUpdated = updated;
 
     try {
+      // history uses text only; image-only messages have empty text (fine)
       const history = updated.map((m) => ({ role: m.role, content: m.text }));
       const res = await fetchWithTimeout(
         "/api/chat",
@@ -1174,6 +1299,10 @@ export default function Home() {
               setMobileMenuOpen(false);
               handleLogout();
             }}
+            onOpenComponents={() => {          // ✅ NEW: close drawer + go to /components
+              setMobileMenuOpen(false);
+              router.push("/components");
+            }}
           />
         </div>
       </div>
@@ -1181,6 +1310,7 @@ export default function Home() {
       {/* ===== MOBILE CHAT ===== */}
       <section className="md:hidden fixed inset-0 z-[25]">
         <div className="flex flex-col h-[100dvh] bg-transparent">
+          {/* Fixed the class here: pt-[72px] */}
           <div className="px-4 pt-[72px] pb-2">
             <QScorePanel q={qscore} />
           </div>
@@ -1200,6 +1330,15 @@ export default function Home() {
             )}
           </div>
 
+          {/* 🆕 Hidden global file input for image uploads (mobile+desktop) */}
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => handleFiles(e.target.files)}
+          />
+
           {/* Composer (MOBILE) */}
           <div className=" bottom-0 left-0 right-0 z-[26] bg-black/70 backdrop-blur-md border-t border-white/10 px-3 pt-2 pb-3">
             <ChatComposer
@@ -1208,7 +1347,11 @@ export default function Home() {
               onChange={handleInputChange}
               onKeyDown={handleKeyPress}
               onSend={handleSendMessage}
-              onPlus={() => setActivated(true)}
+              // 🆕 open image picker on +
+              onPlus={() => {
+                setActivated(true);
+                fileRef.current?.click();
+              }}
               micOn={voiceOn}
               onMicToggle={() => (voiceOn ? stopVoiceChat() : startVoiceChat())}
               textareaRef={textareaRef}
@@ -1320,7 +1463,11 @@ export default function Home() {
                   onChange={handleInputChange}
                   onKeyDown={handleKeyPress}
                   onSend={handleSendMessage}
-                  onPlus={() => setActivated(true)}
+                  // 🆕 open image picker on +
+                  onPlus={() => {
+                    setActivated(true);
+                    fileRef.current?.click();
+                  }}
                   micOn={voiceOn}
                   onMicToggle={() => (voiceOn ? stopVoiceChat() : startVoiceChat())}
                   textareaRef={textareaRef}

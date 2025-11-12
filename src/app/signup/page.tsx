@@ -224,7 +224,7 @@ function SignUpInner() {
               {loading ? "Creating..." : "Sign Up"}
             </button>
 
-          
+           
 
             <div className="flex items-center gap-3">
               <div className="h-px flex-1 bg-white/20" />
@@ -232,17 +232,7 @@ function SignUpInner() {
               <div className="h-px flex-1 bg-white/20" />
             </div>
 
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={() => oauth("google")}
-                disabled={loading || !envOK}
-                className="flex-1 px-4 py-3 font-semibold rounded-full border border-white/30 bg-white/10 hover:bg-white/20 transition-all duration-300 disabled:opacity-60"
-              >
-                Continue with Google
-              </button>
-             
-            </div>
+          
           </form>
 
           {msg && <p className="mt-4 text-sm text-green-300">{msg}</p>}

@@ -325,7 +325,7 @@ export default function QScorePage() {
           <header className="text-center py-5 px-6">
             <div className="inline-block swing-bell">
               <Image
-                src="/quossi12-removebg-preview.png"
+                src="/dannn.png"
                 alt="QUOSSI Logo"
                 width={96}
                 height={96}
