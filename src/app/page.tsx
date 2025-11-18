@@ -206,7 +206,7 @@ export default function QScorePage(): JSX.Element {
           <button
             type="button"
             aria-label="Check your Q-Score"
-            onClick={() => router.push("/form")} // ← Redirect to /form
+            onClick={() => router.push("/LandingPage")} // ← Redirect to /form
             className="w-full flex justify-between items-center px-5 py-3 bg-gray-800/70 rounded-full border border-gray-700 hover:border-gray-600 transition group shadow-md backdrop-blur-sm focus:outline-none focus:ring-2 focus:ring-yellow-400/60"
           >
             <span className="text-gray-300 font-medium">
@@ -217,14 +217,7 @@ export default function QScorePage(): JSX.Element {
             </span>
           </button>
 
-          <div className="mt-3 text-center">
-            <Link
-              href="/signin"
-              className="inline-flex items-center justify-center px-4 py-2 rounded-full border border-gray-700 bg-gray-800/40 text-sm text-gray-200 hover:bg-gray-800/60 active:bg-yellow-400 active:text-black active:border-yellow-400 transition-colors"
-            >
-              Login
-            </Link>
-          </div>
+         
         </div>
 
         {/* Bar Chart Panel */}

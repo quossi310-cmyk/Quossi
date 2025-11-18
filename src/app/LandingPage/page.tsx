@@ -12,9 +12,20 @@ import { Capacitor } from "@capacitor/core";
 import { StatusBar, Style } from "@capacitor/status-bar";
 
 /* ================= QSCORE TYPES ================= */
-type Tone = "positive" | "neutral" | "stressed";
-type Tier = "Ground" | "Flow" | "Gold" | "Sun";
-type QScoreResult = { tone: Tone; qScore: number; tier: Tier; task: string; runAt: string };
+// New Q-Score result shape, matching your backend:
+// { type: "qscore_result", ES, ED, qScore, zone, summary, explanation, tags }
+type QScoreZone = "Ground" | "Flow" | "Gold" | "Sun" | string;
+
+interface QScoreResult {
+  type: "qscore_result";
+  ES: number;
+  ED: number;
+  qScore: number;
+  zone: QScoreZone;
+  summary: string;
+  explanation: string;
+  tags: string[];
+}
 
 // 🆕 extend Message with image fields + status
 interface Message {
@@ -27,13 +38,18 @@ interface Message {
   status?: "sending" | "sent" | "error" | "uploading";
 }
 
+// 🧠 Messages shape for /api/chat (old Grok route)
+interface ClientMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 /* ================= CONSTANTS ================= */
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const STORAGE_KEY = "chat_messages";
 const OPEN_STATE_KEY = "chat_interface_open";
 const UID_KEY = "quossi_user_id";
 const LAST_QSCORE_KEY = "quossi_last_qscore";
-const QSCORE_CARD_SHOWN_KEY = "quossi_qscore_card_shown";
 
 /* Docking behavior for desktop composer */
 const DOCK_DELAY_MS = 800;
@@ -145,39 +161,6 @@ function MessageBubble({ m }: { m: Message }) {
       {m.role === "user" && (
         <div className="flex-shrink-0 mt-1 ml-2">
           <span className="text-white text-sm font-semibold">👤</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function QScorePanel({ q }: { q: QScoreResult | null }) {
-  if (!q) return null;
-
-  const toneColor =
-    q.tone === "positive"
-      ? "bg-emerald-500/20 text-emerald-200 border-emerald-500/40"
-      : q.tone === "stressed"
-      ? "bg-rose-500/20 text-rose-200 border-rose-500/40"
-      : "bg-slate-500/20 text-slate-200 border-slate-500/40";
-
-  return (
-    <div className="animate-slide-up">
-      <div className="flex items-center gap-2">
-        <span className={`px-2 py-1 text-xs rounded-md border ${toneColor}`}>Tone: {q.tone}</span>
-        <span className="px-2 py-1 text-xs rounded-md border border-yellow-400/40 bg-yellow-400/10 text-yellow-200">
-          Q-Score: <strong className="ml-1 text-yellow-100">{Math.round(q.qScore)}</strong>
-        </span>
-        <span className="px-2 py-1 text-xs rounded-md border border-blue-400/40 bg-blue-400/10 text-blue-200">
-          Tier: <strong className="ml-1 text-blue-100">{q.tier}</strong>
-        </span>
-      </div>
-
-      {q.task && (
-        <div className="mt-2 p-3 rounded-lg border border-white/10 bg-white/5">
-          <div className="text-xs uppercase tracking-wide text-white/60 mb-1">Suggested Task</div>
-          <div className="text-sm text-white/90">{q.task}</div>
-          <div className="mt-1 text-[11px] text-white/50">Generated: {new Date(q.runAt).toLocaleString()}</div>
         </div>
       )}
     </div>
@@ -548,20 +531,6 @@ function ChevronDown(props: IconProps) {
   );
 }
 
-/* ====== Tiny inline fallback for QScoreBanner (prevents ReferenceError) ====== */
-function QScoreBanner() {
-  return (
-    <div className="w-full h-full grid place-items-center bg-gradient-to-br from-yellow-300/10 to-white/5 text-white">
-      <div className="text-center px-6">
-        <h2 className="text-2xl font-semibold mb-2">Your Q-Score</h2>
-        <p className="text-white/70 max-w-md">
-          This is a placeholder for <code>QScoreBanner</code>. Replace with your full component when ready.
-        </p>
-      </div>
-    </div>
-  );
-}
-
 /* ================= MAIN ================= */
 export default function Home() {
   const router = useRouter();
@@ -583,6 +552,24 @@ export default function Home() {
   const [authPromptOpen, setAuthPromptOpen] = useState(false);
   const [isAuthed, setIsAuthed] = useState<boolean | null>(null);
 
+  // 🧭 Onboarding flow step for /api/chat (old Grok route)
+  const [currentStep, setCurrentStep] = useState<number>(() => {
+    if (typeof window === "undefined") return 0;
+    const raw = localStorage.getItem("qchat_current_step");
+    const n = raw ? Number(raw) : 0;
+    return Number.isFinite(n) ? n : 0;
+  });
+
+  const [onboardingDone, setOnboardingDone] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("qchat_onboarding_done") === "1";
+  });
+
+  // 🆕 know when messages are hydrated from localStorage
+  const [messagesHydrated, setMessagesHydrated] = useState(false);
+  // 🆕 prevent greeting from firing multiple times
+  const bootedRef = useRef(false);
+
   // --- Voice/WebRTC refs & state ---
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -595,6 +582,9 @@ export default function Home() {
 
   // 🆕 file input ref for image uploads
   const fileRef = useRef<HTMLInputElement | null>(null);
+
+  // 🆕 Q-Score text message control
+  const [hasRequestedQScore, setHasRequestedQScore] = useState(false);
 
   function notify(msg: string, ms = 2400) {
     setToast({ open: true, text: msg });
@@ -683,7 +673,7 @@ export default function Home() {
     }
   }
 
-  // 🧠 send image to /api/chat for analysis
+  // 🧠 send image to /api/chat for analysis (old route contract)
   async function analyzeImageWithQuossi(
     imageUrl: string,
     currentMessages: Message[]
@@ -691,7 +681,7 @@ export default function Home() {
     try {
       setIsLoading(true);
 
-      const history = currentMessages.map((m) => ({
+      const history: ClientMessage[] = currentMessages.map((m) => ({
         role: m.role,
         content: m.text || "",
       }));
@@ -702,10 +692,10 @@ export default function Home() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            userId,       // 👈 include userId for memory
-            history,
-            imageUrl,     // 👈 NEW
-            message: "",  // image-only in this flow
+            messages: history,   // ✅ old route shape
+            currentStep,         // ✅ keep onboarding flow consistent
+            userId,              // optional
+            imageUrl,            // backend can ignore or use later
           }),
         },
         60000
@@ -716,13 +706,18 @@ export default function Home() {
         throw new Error(errorData?.error || "API error");
       }
 
-      const { response } = await res.json();
+      const data = await res.json();
+
+      const replyText: string =
+        data?.reply ??
+        data?.response ??
+        "I’ve seen your image. Let’s keep going.";
 
       const ts = Date.now();
       const assistantMsg: Message = {
         id: ts,
         role: "assistant",
-        text: response,
+        text: replyText,
         timestamp: ts,
       };
 
@@ -730,11 +725,21 @@ export default function Home() {
       setMessages(updated);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
 
-      const newHistory = updated.map((m) => ({
+      // Update onboarding step
+      const nextStepFromServer =
+        typeof data?.nextStep === "number" ? data.nextStep : currentStep;
+      const doneFromServer = Boolean(data?.done);
+
+      setCurrentStep(nextStepFromServer);
+      setOnboardingDone(doneFromServer);
+
+      const newHistory: ClientMessage[] = updated.map((m) => ({
         role: m.role,
         content: m.text || "",
       }));
-      await maybeUpdateQScore(newHistory);
+
+      // 🧠 6. Orchestrate post-answer routes (image flow)
+      await runPostAnswerPipelines(newHistory, "[image upload]");
     } catch (error: any) {
       const ts = Date.now();
       const errorMsg: Message = {
@@ -966,7 +971,6 @@ export default function Home() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const hasValidatedOnceRef = useRef(false);
-  const [qscoreModalOpen, setQscoreModalOpen] = useState(false);
 
   const jumpToBottom = (el: HTMLDivElement | null, smooth = false) => {
     if (!el) return;
@@ -989,23 +993,12 @@ export default function Home() {
         setMessages(migrated);
         localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
       }
+      // 🆕 we have attempted to hydrate (even if nothing was stored)
+      setMessagesHydrated(true);
     };
     load();
     const id = setInterval(load, 60 * 60 * 1000);
     return () => clearInterval(id);
-  }, []);
-
-  /* Show QScore card once after 10s */
-  useEffect(() => {
-    try {
-      const shown = localStorage.getItem(QSCORE_CARD_SHOWN_KEY);
-      if (shown === "1") return;
-      const id = window.setTimeout(() => {
-        setQscoreModalOpen(true);
-        try { localStorage.setItem(QSCORE_CARD_SHOWN_KEY, "1"); } catch {}
-      }, 10000);
-      return () => window.clearTimeout(id);
-    } catch {}
   }, []);
 
   /* Initial QScore calculation once */
@@ -1028,6 +1021,14 @@ export default function Home() {
   useEffect(() => {
     localStorage.setItem(OPEN_STATE_KEY, String(isInputFocused));
   }, [isInputFocused]);
+
+  /* 🆕 Persist onboarding step & done flag */
+  useEffect(() => {
+    try {
+      localStorage.setItem("qchat_current_step", String(currentStep));
+      localStorage.setItem("qchat_onboarding_done", onboardingDone ? "1" : "0");
+    } catch {}
+  }, [currentStep, onboardingDone]);
 
   /* Autoscroll on new messages */
   useEffect(() => {
@@ -1055,6 +1056,7 @@ export default function Home() {
     }
   }, [isInputFocused]);
 
+  // 🔁 Q-Score from full history (for backend / chat use only)
   async function maybeUpdateQScore(history: { role: "user" | "assistant"; content: string }[]) {
     try {
       const res = await fetch("/api/qscore", {
@@ -1072,15 +1074,161 @@ export default function Home() {
       if (!res.ok) return;
       const data = await res.json();
 
-      if (data?.allowed && data?.result) {
-        setQscore(data.result as QScoreResult);
-        localStorage.setItem(LAST_QSCORE_KEY, JSON.stringify(data.result));
+      let result: QScoreResult | null = null;
+      if (data?.type === "qscore_result") {
+        result = data as QScoreResult;
+      } else if (data?.result?.type === "qscore_result") {
+        result = data.result as QScoreResult;
+      }
+
+      if (result) {
+        setQscore(result);
+        localStorage.setItem(LAST_QSCORE_KEY, JSON.stringify(result));
       } else {
         setQscore(null);
         localStorage.removeItem(LAST_QSCORE_KEY);
       }
-    } catch {}
+    } catch {
+      // swallow error for background
+    }
   }
+
+  /* ===========================================================
+   * Q-Score chat message helpers
+   * =========================================================== */
+
+  function formatQScoreAsChat(result: QScoreResult): string {
+    const tagsText =
+      result.tags && result.tags.length
+        ? "\n\nTags: " + result.tags.map((t) => `#${t}`).join(" ")
+        : "";
+
+    return (
+      `Alright, I’ve run your first Q-Score scan.\n\n` +
+      `• Q-Score: ${Math.round(result.qScore)}/100\n` +
+      `• Zone: ${result.zone}\n` +
+      `• ES (Emotional Stability): ${result.ES}\n` +
+      `• ED (Emotional Drift): ${result.ED}\n\n` +
+      `Quick read:\n${result.summary}\n\n` +
+      `Deeper breakdown:\n${result.explanation}` +
+      tagsText +
+      `\n\nWe’ll keep tracking this over time. Don’t chase the number—focus on the habits behind it.`
+    );
+  }
+
+  async function requestQScoreChatMessage(fullHistory: ClientMessage[]) {
+    if (hasRequestedQScore) return;
+
+    try {
+      setHasRequestedQScore(true);
+
+      const res = await fetch("/api/qscore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, history: fullHistory }),
+      });
+
+      if (!res.ok) {
+        console.error("QScore chat call failed:", await res.text().catch(() => ""));
+        return;
+      }
+
+      const data = await res.json();
+
+      let result: QScoreResult | null = null;
+      if (data?.type === "qscore_result") {
+        result = data as QScoreResult;
+      } else if (data?.result?.type === "qscore_result") {
+        result = data.result as QScoreResult;
+      }
+
+      if (!result) return;
+
+      // sync stored result
+      setQscore(result);
+      try {
+        localStorage.setItem(LAST_QSCORE_KEY, JSON.stringify(result));
+      } catch {}
+
+      const text = formatQScoreAsChat(result);
+
+      const ts = Date.now();
+      const assistantMsg: Message = {
+        id: ts,
+        role: "assistant",
+        timestamp: ts,
+        text,
+      };
+
+      setMessages((prev) => {
+        const next = [...prev, assistantMsg];
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+        return next;
+      });
+    } catch (err) {
+      console.error("QScore chat error:", err);
+    }
+  }
+
+  /* ===========================================================
+   * 6. How the frontend should hit these routes (quick sketch)
+   *    After each user answer
+   * ===========================================================
+   *
+   * This helper centralizes everything that should run AFTER
+   * a user answer + assistant reply is added to history.
+   */
+  async function runPostAnswerPipelines(
+    history: ClientMessage[],
+    lastUserText: string
+  ) {
+    // 1️⃣ Always keep this: update Q-Score from full history (no UI card)
+    await maybeUpdateQScore(history);
+
+    // 2️⃣ Optionally fan out to other routes (kept commented)
+    /*
+    void fetch("/api/journal", { ... });
+    void fetch("/api/trader-state", { ... });
+    void fetch("/api/tasks/suggest", { ... });
+    void fetch("/api/news/refresh", { ... });
+    */
+  }
+
+  // 🆕 Let Quossi/Grok speak first (static greeting version)
+  async function sendInitialGreeting() {
+    setIsLoading(true);
+    try {
+      // tiny delay so the "typing" bubble feels natural
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      const ts = Date.now();
+      const assistantMsg: Message = {
+        id: ts,
+        role: "assistant",
+        timestamp: ts,
+        text: `Hi, I’m Q. I help traders understand the part of the market most people ignore — their mind. I don’t judge, I don’t rush, and I don’t forget. I listen. Your Q-Score is basically the blood pressure of your finances, and we’ll check it together. Before we begin… what’s your trading name, boss?`,
+      };
+
+      setMessages((prev) => {
+        const next = [...prev, assistantMsg];
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+        return next;
+      });
+      // ❌ no pipelines yet; user hasn’t answered
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  // 🆕 Auto-greet: Quossi sends the first message when there’s no history
+  useEffect(() => {
+    if (!messagesHydrated) return;
+    if (bootedRef.current) return;
+    if (messages.length === 0) {
+      bootedRef.current = true;
+      void sendInitialGreeting();
+    }
+  }, [messagesHydrated, messages.length]);
 
   const handleSendMessage = async () => {
     if (!input.trim() || isLoading) return;
@@ -1103,16 +1251,20 @@ export default function Home() {
     let finalUpdated = updated;
 
     try {
-      const history = updated.map((m) => ({ role: m.role, content: m.text }));
+      const history: ClientMessage[] = updated.map((m) => ({
+        role: m.role,
+        content: m.text || "",
+      }));
+
       const res = await fetchWithTimeout(
         "/api/chat",
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            message: userText,
-            history,
-            userId, // 👈 include userId for memory on text chats too
+            messages: history,   // ✅ old route shape
+            currentStep,         // ✅ tell backend which onboarding question we’re on
+            userId,              // extra, backend can ignore if it wants
           }),
         },
         30000
@@ -1123,10 +1275,17 @@ export default function Home() {
         throw new Error(errorData?.error || "API error");
       }
 
-      const { response } = await res.json();
+      const data = await res.json();
+
+      // Old route returns: { reply, nextStep, done }
+      const replyText: string =
+        data?.reply ??
+        data?.response ??
+        "I’m here with you. Let’s continue whenever you’re ready.";
+
       const ts = Date.now();
       const assistantMsg: Message = {
-        text: response,
+        text: replyText,
         id: ts,
         timestamp: ts,
         role: "assistant",
@@ -1135,8 +1294,34 @@ export default function Home() {
       setMessages(finalUpdated);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(finalUpdated));
 
-      const newHistory = finalUpdated.map((m) => ({ role: m.role, content: m.text }));
-      await maybeUpdateQScore(newHistory);
+      const newHistory: ClientMessage[] = finalUpdated.map((m) => ({
+        role: m.role,
+        content: m.text || "",
+      }));
+
+      // Update onboarding step state
+      const nextStepFromServer =
+        typeof data?.nextStep === "number" ? data.nextStep : currentStep;
+      const doneFromServer = Boolean(data?.done);
+
+      setCurrentStep(nextStepFromServer);
+      setOnboardingDone(doneFromServer);
+
+      // 🔁 If Grok says it's time for Q-Score, trigger Q-Score chat once
+      const lowerReply = replyText.toLowerCase();
+      if (
+        !hasRequestedQScore &&
+        (
+          lowerReply.includes("let’s move to your q-score now") ||
+          lowerReply.includes("let's move to your q-score now") ||
+          lowerReply.includes("move to your q-score")
+        )
+      ) {
+        void requestQScoreChatMessage(newHistory);
+      }
+
+      // 🧠 QScore background + other pipelines
+      await runPostAnswerPipelines(newHistory, userText);
     } catch (error: any) {
       const ts = Date.now();
       const errorMsg: Message = {
@@ -1387,11 +1572,9 @@ export default function Home() {
       {/* ===== MOBILE CHAT ===== */}
       <section className="md:hidden fixed inset-0 z-[25]">
         <div className="flex flex-col h-[100dvh] bg-transparent">
-          <div className="px-4 pt-[72px] pb-2">
-            <QScorePanel q={qscore} />
-          </div>
+          {/* 🟡 QScore panel removed from top on mobile */}
 
-          <div ref={mobileMessagesRef} className="flex-1 overflow-y-auto px-4 pb-[108px] pt-2 space-y-4 overscroll-contain scroll-smooth">
+          <div ref={mobileMessagesRef} className="flex-1 overflow-y-auto px-4 pb-[108px] pt-[72px] space-y-4 overscroll-contain scroll-smooth">
             {messages.map((m) => (
               <MessageBubble key={m.id} m={m} />
             ))}
@@ -1499,11 +1682,7 @@ export default function Home() {
 
           {activated && (
             <>
-              {qscore && (
-                <div className="px-4 pt-3 shrink-0">
-                  <QScorePanel q={qscore} />
-                </div>
-              )}
+              {/* 🟡 QScore panel removed from top on desktop */}
 
               <div
                 ref={deskMessagesRef}
@@ -1561,24 +1740,7 @@ export default function Home() {
         onSignup={handleGoSignup}
       />
 
-      {/* ===== QScore card modal (show once) ===== */}
-      {qscoreModalOpen && (
-        <div role="dialog" aria-modal="true" aria-label="Your QScore" className="fixed inset-0 z-[110] flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setQscoreModalOpen(false)} />
-          <div className="relative z-[111] w-full h-full md:w-[92%] md:h-[92%] rounded-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
-            <button
-              onClick={() => setQscoreModalOpen(false)}
-              aria-label="Close QScore"
-              className="absolute top-4 right-4 z-[112] w-10 h-10 grid place-items-center rounded-lg border border-white/20 bg-white/10 hover:bg-white/15 text-white"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M6 6l12 12M18 6L6 18" stroke="white" strokeWidth="1.8" strokeLinecap="round" />
-              </svg>
-            </button>
-            <QScoreBanner />
-          </div>
-        </div>
-      )}
+      {/* QScore big modal & banner completely removed */}
 
       {/* Keyframes & extras */}
       <style jsx global>{`

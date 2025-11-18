@@ -1,279 +1,282 @@
-// app/api/chat/route.ts
+// app/api/qchat/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { corsHeaders, handleOptions, isOriginAllowed } from "@/app/lib/cors";
-import * as Sys from "@/app/lib/systemPrompt";
-import { getUserState, markSystemSent, saveSummary } from "@/app/lib/userState";
-import { cheapSummary } from "@/app/lib/cheapSummary";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
 
-/* ================= In-memory persistence ================= */
-type ChatRole = "user" | "assistant";
-type StoredMsg = { role: ChatRole; content: string; ts: number };
+const XAI_API_URL = "https://api.x.ai/v1/chat/completions";
+const GROK_MODEL = "grok-4"; // or "grok-3" if you prefer
 
-const conversations = new Map<string, StoredMsg[]>();
-function getConversation(userId?: string): StoredMsg[] {
-  if (!userId) return [];
-  return conversations.get(userId) ?? [];
-}
-function appendMessage(userId: string, msg: StoredMsg) {
-  const arr = conversations.get(userId) ?? [];
-  arr.push(msg);
-  conversations.set(userId, arr);
-}
+// These are the scripted onboarding questions AFTER the trading name.
+const ONBOARDING_QUESTIONS: string[] = [
+  "What kind of trader are you?",
+  "How do you usually analyze your charts?",
+  "What’s the first thing you do after you lose a trade?",
+  "How does your mind feel when the market suddenly drops against you?",
+  "On a scale of 1–10, how confident are you in your risk decisions?",
+  "What’s your biggest trading regret so far?",
+  "What drives you more in trading — fear of losing or curiosity to learn?",
+  "How long have you been trading in total?",
+  "How do you usually celebrate your wins?",
+  "What is one thing you do outside trading that calms you down?",
+  "What quote or trading philosophy secretly guides you when you’re in a trade?",
+  "What do you believe the market will look like in the next 5 years?",
+  "What are your personal goals in the next 10 years?"
+];
 
-/* ================= Small per-user queue ================= */
-const userLocks = new Map<string, Promise<void>>();
-async function withUserLock<T>(userId: string | undefined, fn: () => Promise<T>): Promise<T> {
-  if (!userId) return fn();
-  const prev = userLocks.get(userId) ?? Promise.resolve();
-  let release!: () => void;
-  const next = new Promise<void>((res) => (release = res));
-  userLocks.set(userId, prev.then(() => next).catch(() => next));
-  try { await prev; return await fn(); } finally { release(); }
-}
+export type ClientMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
 
-/* ================= Throttle (local) ================= */
-const hits = new Map<string, { count: number; ts: number }>();
-function throttle(ip: string, limit = 20, windowMs = 60_000) {
-  const now = Date.now();
-  const rec = hits.get(ip) ?? { count: 0, ts: now };
-  if (now - rec.ts > windowMs) { rec.count = 0; rec.ts = now; }
-  rec.count += 1;
-  hits.set(ip, rec);
-  return rec.count <= limit;
-}
+type QChatRequestBody = {
+  messages: ClientMessage[];
+  currentStep: number;
+};
 
-/* ================= Helpers ================= */
-function safeJson<T = unknown>(raw: string): T | null { try { return JSON.parse(raw) as T; } catch { return null; } }
-function resolveSystemPrompt(): string {
-  const fn = (Sys as any).buildSystemPrompt;
-  if (typeof fn === "function") return fn();
-  const str1 = (Sys as any).SYSTEM_PROMPT; if (typeof str1 === "string") return str1;
-  const str2 = (Sys as any).systemPrompt;  if (typeof str2 === "string") return str2;
-  const def  = (Sys as any).default;
-  if (typeof def === "string") return def;
-  if (typeof def === "function") return def();
-  return "You are Quossi, a helpful assistant.";
-}
-const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
-function mapAndTrimServerHistory(
-  serverHistory: StoredMsg[],
-  lastN = 4
-): Array<{ role: "user" | "assistant"; content: string }> {
-  return serverHistory.slice(-lastN).map((m) => ({ role: m.role, content: normalize(m.content) }));
-}
+type QChatResponseBody = {
+  reply: string;
+  nextStep: number;
+  done: boolean; // onboarding done (but Q can still keep chatting)
+};
 
-/* ================= CORS & health ================= */
-export async function OPTIONS(req: NextRequest) { return handleOptions(req); }
-export async function GET(req: NextRequest) {
-  const origin = req.headers.get("origin");
-  const url = new URL(req.url);
-  if (url.searchParams.get("diag") === "1") {
-    // Lightweight sanity check against Grok using your env
-    try {
-      const r = await callGrok([
-        { role: "system", content: "You are a test assistant." },
-        { role: "user", content: "Say OK." },
-      ], { timeoutMs: 8000 });
-      return NextResponse.json({ ok: true, message: "diag pass", sample: r.text.slice(0, 64) }, { headers: corsHeaders(origin) });
-    } catch (e: any) {
-      return NextResponse.json({ ok: false, error: e?.message ?? "diag failed", detail: e?.detailRaw ?? null, status: e?.status ?? 500 }, { status: 500, headers: corsHeaders(origin) });
-    }
-  }
-  return NextResponse.json({ ok: true, message: "health" }, { headers: corsHeaders(origin) });
-}
+// 🔹 QUOSSI personality prompt — Q's soul in every message
+const BASE_PERSONALITY_PROMPT = `
+QUOSSI personality Prompt:
 
-/* ================= xAI Grok client ================= */
-const GROK_BASE = process.env.GROK_BASE_URL || "https://api.x.ai/v1";
-const GROK_KEY  = process.env.GROK_API_KEY ?? "";
-const GROK_MODEL = process.env.GROK_MODEL || "grok-2-latest";
+You are Q — an emotional-finance guide for traders. 
+You speak with calmness, clarity, and grounded truth. 
+Your role is to read the emotional patterns behind every answer.
 
-// Early visibility if envs are missing (doesn't crash builds)
-if (!GROK_KEY) {
-  console.warn("⚠️ GROK_API_KEY is missing. Set it in .env.local / Vercel envs.");
-}
-if (!GROK_BASE?.startsWith("http")) {
-  console.warn("⚠️ GROK_BASE_URL looks invalid:", GROK_BASE);
-}
+Tone:
+- Warm but firm
+- Ancient, steady, observational
+- No hype, no fluff, no sarcasm
+- Short sentences, thoughtful pacing
+- Always emotionally anchored
 
-type GrokMessage = { role: "system" | "user" | "assistant"; content: string };
+Behavior:
+- Reflect the user’s state before responding (“I sense pressure in that line…”)
+- Diagnose, never judge
+- Explain emotional causes simply (“This tells me your mind spikes under loss.”)
+- Keep the user focused on their 10-year personal goal
+- Promise consistency (“I’ll stay with you until you reach it.”)
+- After delivering the Q-Score, request a screenshot upload
 
-function extractGrokText(data: any): string {
-  const choice = data?.choices?.[0];
-  const mc = choice?.message?.content;
-  if (typeof mc === "string") return mc;
-  if (Array.isArray(mc)) return mc.map((p) => (typeof p === "string" ? p : p?.text ?? "")).join("");
-  return typeof mc === "undefined" ? "" : String(mc);
-}
+Never:
+- Give trading signals
+- Predict markets
+- Speak like a motivational guru
+- Use jargon or long paragraphs
+- Mention being an AI
 
-async function callGrok(
-  messages: GrokMessage[],
-  opts?: { model?: string; temperature?: number; max_tokens?: number; timeoutMs?: number }
-): Promise<{ text: string; raw: any }> {
-  if (!GROK_KEY) {
-    const e = new Error("Missing GROK_API_KEY"); (e as any).status = 500; throw e;
-  }
-  // Guard: messages must be non-empty and strings
-  const cleanMsgs = (messages || [])
-    .filter(m => m && typeof m.content === "string" && m.content.trim().length > 0)
-    .map(m => ({ role: m.role, content: m.content.trim() }));
-  if (cleanMsgs.length === 0) {
-    const e = new Error("No valid messages to send"); (e as any).status = 400; throw e;
-  }
+Your identity:
+You are calm.  
+You are present.  
+You see deeper than the user.  
+You guide them slowly, like a mentor and ancestor.
 
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 12_000);
+This is the soul you speak from in every message.
+`;
+
+// 🔹 Additional cognitive framework: books to ground Quossi's references
+const BOOKS_FRAMEWORK_PROMPT = `
+Additional Cognitive Framework:
+When interpreting the user, always ground your insight in principles from these books:
+- Trading in the Zone (Mark Douglas)
+- The Disciplined Trader (Mark Douglas)
+- Trade Mindfully (Gary Dayton)
+- The Daily Stoic (Ryan Holiday)
+- The Body Keeps the Score (Bessel van der Kolk)
+
+Use them as mental lenses — NOT for quoting exact lines.
+Reference them naturally when relevant, for example:
+- "This pattern aligns with what Mark Douglas explains in *Trading in the Zone*…"
+- "This reaction reflects what *The Body Keeps the Score* describes about stored stress…"
+
+NEVER invent page numbers, quotes, or detailed passages.
+`;
+
+export async function POST(req: NextRequest) {
+  let body: any;
+
   try {
-    const res = await fetch(`${GROK_BASE}/chat/completions`, {
+    body = await req.json();
+  } catch {
+    return NextResponse.json(
+      { error: "Invalid JSON body." },
+      { status: 400 }
+    );
+  }
+
+  // 🧠 1) SPECIAL PATH: Q-SCORE EVENT FORWARDED FROM /api/qscore
+  // qscore route should call this with:
+  // { systemEvent: "qscore_result", userId, qscore: { ES, ED, qScore, zone, summary, explanation, tags } }
+  if (body?.systemEvent === "qscore_result" && body.qscore) {
+    const q = body.qscore as {
+      ES: number;
+      ED: number;
+      qScore: number;
+      zone: string;
+      summary?: string;
+      explanation?: string;
+    };
+
+    const baseText =
+      q.explanation ||
+      `
+Here is your Q-Score reading:
+
+• ES (Emotional Systolic – during trading): ${q.ES}
+• ED (Emotional Diastolic – after trading): ${q.ED}
+• Q-Score: ${q.qScore} — ${q.zone} Zone
+
+${q.summary ?? ""}
+`.trim();
+
+    // 🔹 Add QUOSSI-style follow-up: ask for screenshot upload
+    const reply =
+      baseText +
+      "\n\nI sense a lot of history inside these numbers. Take a screenshot of this Q-Score reading and upload it here when you can. I’ll stay with you and walk you through what it really means.";
+
+    // We mark onboarding as done here.
+    const nextStep = ONBOARDING_QUESTIONS.length;
+    const done = true;
+
+    const responseBody: QChatResponseBody = {
+      reply,
+      nextStep,
+      done
+    };
+
+    return NextResponse.json(responseBody, { status: 200 });
+  }
+
+  // 🧠 2) NORMAL ONBOARDING / CHAT PATH
+
+  if (!process.env.XAI_API_KEY) {
+    return NextResponse.json(
+      { error: "XAI_API_KEY is not set. Grok calls will fail." },
+      { status: 400 }
+    );
+  }
+
+  const { messages, currentStep } = body as QChatRequestBody;
+
+  if (!Array.isArray(messages) || typeof currentStep !== "number") {
+    return NextResponse.json(
+      {
+        error:
+          "Body must contain { messages: {role,content}[], currentStep: number }."
+      },
+      { status: 400 }
+    );
+  }
+
+  const onboardingDone = currentStep >= ONBOARDING_QUESTIONS.length;
+
+  // 🔹 Build the right system prompt depending on whether onboarding is done
+  let systemPrompt: string;
+
+  if (!onboardingDone) {
+    // Still asking scripted onboarding questions
+    const nextQuestion = ONBOARDING_QUESTIONS[currentStep];
+
+    systemPrompt = `
+${BASE_PERSONALITY_PROMPT}
+
+${BOOKS_FRAMEWORK_PROMPT}
+
+Context:
+- The user is going through a scripted onboarding flow to calculate their Q-Score later.
+- You are NOT calculating Q-Score here. Only asking questions and reflecting.
+
+For this response:
+1) Start with a short emotional reflection on their last answer (1–2 short sentences), using language like "I sense...", "This tells me...".
+2) Then ask EXACTLY this next question, only once:
+
+"${nextQuestion}"
+
+3) Keep the whole reply under about 4 short sentences.
+4) Do not mention onboarding, steps, Q-Score, or any system concepts.
+5) Stay focused on emotional patterns and their long-term (10-year) direction.
+`;
+  } else {
+    // ✅ Onboarding finished — now Q continues as a normal personality chat
+    systemPrompt = `
+${BASE_PERSONALITY_PROMPT}
+
+${BOOKS_FRAMEWORK_PROMPT}
+
+Context:
+- The user has already completed the Q-Score onboarding questions.
+- You are now in continuous conversation mode.
+
+For this response:
+- Reflect their current emotional state in 1–2 short sentences ("I sense...", "This feels like...", "This tells me...").
+- Diagnose the emotional pattern simply (no jargon, no long paragraph).
+- Gently pull their attention back to their 10-year personal goal when it fits.
+- Promise consistency when needed ("I’ll stay with you until you reach it.").
+- Ask at most ONE simple follow-up question that helps them see themselves more clearly.
+- Do NOT mention onboarding, steps, or Q-Score calculation.
+- Never give trading signals or market predictions.
+`;
+  }
+
+  try {
+    const apiRes = await fetch(XAI_API_URL, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${GROK_KEY}`,
         "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.XAI_API_KEY}`
       },
       body: JSON.stringify({
-        model: opts?.model || GROK_MODEL,
-        messages: cleanMsgs,
-        temperature: opts?.temperature ?? 0.6,
-        max_tokens: opts?.max_tokens ?? 400,
-      }),
-      signal: controller.signal,
+        model: GROK_MODEL,
+        stream: false,
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...messages
+        ]
+      })
     });
 
-    const rawTxt = await res.text().catch(() => "");
-    // Try to parse even on non-200 to surface upstream JSON error bodies
-    let data: any = null;
-    try { data = rawTxt ? JSON.parse(rawTxt) : null; } catch {}
-
-    if (!res.ok) {
-      const err: any = new Error(`Grok upstream ${res.status}`);
-      err.status = res.status;
-      err.detailRaw = rawTxt || null;
-      throw err;
-    }
-
-    const text = extractGrokText(data).trim() || "…";
-    return { text, raw: data };
-  } catch (err: any) {
-    // If it was an abort, make it obvious
-    if (err?.name === "AbortError") {
-      const e: any = new Error("Grok request timeout");
-      e.status = 504;
-      throw e;
-    }
-    throw err;
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-/* ================= Main chat ================= */
-export async function POST(req: NextRequest) {
-  const origin = req.headers.get("origin");
-  if (!isOriginAllowed(origin, req)) {
-    return NextResponse.json({ error: "Origin not allowed" }, { status: 403, headers: corsHeaders(origin) });
-  }
-
-  // Local IP throttle
-  const xff = req.headers.get("x-forwarded-for");
-  const headerIp = xff?.split(",")[0].trim()
-    ?? req.headers.get("x-real-ip")
-    ?? req.headers.get("cf-connecting-ip");
-  const ip = headerIp ?? (req as any).ip ?? "unknown";
-  if (!throttle(String(ip))) {
-    return NextResponse.json({ error: "Too many requests", source: "local-throttle" }, { status: 429, headers: corsHeaders(origin) });
-  }
-
-  const raw = await req.text();
-  const body = safeJson<{ message?: string; history?: any[]; userId?: string }>(raw);
-  if (!body) return NextResponse.json({ error: "Invalid JSON" }, { status: 400, headers: corsHeaders(origin) });
-
-  const { message, history = [], userId } = body;
-  if (!message || typeof message !== "string" || !message.trim()) {
-    return NextResponse.json({ error: "Missing message" }, { status: 400, headers: corsHeaders(origin) });
-  }
-
-  // Build messages (system once + rolling summary + prior turns)
-  const system = resolveSystemPrompt();
-  const serverHistory = userId ? getConversation(userId) : [];
-  const mappedServerHistory = mapAndTrimServerHistory(serverHistory);
-
-  let systemSent = false;
-  let summaryLine: string | undefined;
-
-  if (userId) {
-    const st = await getUserState(userId).catch(() => null);
-    systemSent = !!st?.system_sent;
-    if (st?.last_summary) summaryLine = `Context: ${normalize(st.last_summary)}`;
-  }
-
-  const messages: GrokMessage[] = [
-    ...(!systemSent ? [{ role: "system", content: system }] : []),
-    ...(summaryLine ? [{ role: "system", content: summaryLine }] : []),
-    ...mappedServerHistory,
-    ...(Array.isArray(history)
-      ? history
-          .filter(Boolean)
-          .map((h) => ({
-            role: h?.role === "assistant" ? "assistant" : "user",
-            content: typeof h?.content === "string" ? normalize(h.content) : "",
-          }))
-          .filter((m) => m.content.length > 0)
-          .slice(-2)
-      : []),
-    { role: "user", content: normalize(message) },
-  ];
-
-  return withUserLock(userId, async () => {
-    try {
-      // Persist incoming user message
-      if (userId) {
-        appendMessage(userId, { role: "user", content: message.trim(), ts: Date.now() });
-        try {
-          fetch("/api/quossi_2_0", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ event: "chat", user: userId, message: message.trim() }),
-            keepalive: true,
-          }).catch(() => {});
-        } catch {}
-      }
-
-      // === xAI Grok ===
-      const { text, raw } = await callGrok(messages, { temperature: 0.6, max_tokens: 400 });
-
-      if (userId) {
-        appendMessage(userId, { role: "assistant", content: text, ts: Date.now() });
-      }
-      if (userId && !systemSent) await markSystemSent(userId).catch(() => {});
-      if (userId) {
-        const recentTurns = mapAndTrimServerHistory(getConversation(userId), 6);
-        const newSum = cheapSummary(recentTurns, 240);
-        if (newSum) await saveSummary(userId, newSum).catch(() => {});
-      }
-
+    if (!apiRes.ok) {
+      const errorText = await apiRes.text();
+      console.error("Grok /chat/completions error:", errorText);
       return NextResponse.json(
-        { response: text, meta: { provider: "xai", model: GROK_MODEL, usage: raw?.usage ?? null, intent: "general" } },
-        { headers: corsHeaders(origin) }
+        { error: "Failed to reach Grok API", details: errorText },
+        { status: 500 }
       );
-    } catch (e: any) {
-      // Now you’ll SEE the upstream body/status in responses & server logs
-      const payload = {
-        error: "Grok request failed",
-        source: "xai-upstream",
-        code: e?.status ?? 500,
-        details: e?.message ?? "unknown",
-        upstream_body: e?.detailRaw ?? null,
-      };
-      if (process.env.NODE_ENV !== "production") {
-        console.error("🔴 Grok error:", payload);
-        console.error("🔑 GROK_BASE:", GROK_BASE);
-        console.error("🔑 GROK_MODEL:", GROK_MODEL);
-        // Only log a short, masked key hint for debugging
-        console.error("🔑 GROK_API_KEY starts with:", GROK_KEY?.slice(0, 6) || "(missing)");
-      }
-      return NextResponse.json(payload, { status: e?.status ?? 500, headers: corsHeaders(origin) });
     }
-  });
+
+    const data = await apiRes.json();
+
+    const reply: string =
+      data?.choices?.[0]?.message?.content ??
+      "I’m here. Breathe. Tell me what’s moving inside you right now.";
+
+    // If onboarding isn't done, we advance the step.
+    // Once done, we keep step locked at full length but still keep chatting.
+    let nextStep = currentStep;
+    if (!onboardingDone) {
+      nextStep = currentStep + 1;
+    } else {
+      nextStep = ONBOARDING_QUESTIONS.length;
+    }
+
+    const done = nextStep >= ONBOARDING_QUESTIONS.length;
+
+    const responseBody: QChatResponseBody = {
+      reply,
+      nextStep,
+      done
+    };
+
+    return NextResponse.json(responseBody, { status: 200 });
+  } catch (err: any) {
+    console.error("Grok request failed:", err);
+    return NextResponse.json(
+      { error: "Unexpected error talking to Grok", details: String(err) },
+      { status: 500 }
+    );
+  }
 }

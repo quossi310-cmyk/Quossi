@@ -5,19 +5,21 @@
  * Produces Q-Score (100–600), Range, and Reflection.
  */
 
-export interface QScoreResult {
+/* ================= Public Types ================= */
+export type QScoreData = {
   qScore: number;
   range: string;
   archetype: string;
   reflection: string;
-}
+};
 
+/* ================= Internals ================= */
 const ranges = [
   { name: "🌪 Storm", min: 100, max: 199, archetype: "The Reactor", motto: "Emotion first, logic later." },
   { name: "🌍 Ground", min: 200, max: 299, archetype: "The Builder", motto: "Steady hands make heavy bags." },
   { name: "🌊 Flow", min: 300, max: 399, archetype: "The Surfer", motto: "Don’t fight the wave — ride it." },
   { name: "🏆 Gold", min: 400, max: 499, archetype: "The Strategist", motto: "Silence wins faster." },
-  { name: "☀️ Sun", min: 500, max: 600, archetype: "The Oracle", motto: "Peace is the ultimate edge." }
+  { name: "☀️ Sun",  min: 500, max: 600, archetype: "The Oracle",    motto: "Peace is the ultimate edge." }
 ];
 
 function detectTone(text: string): string {
@@ -79,7 +81,8 @@ function generateReflection(range: { name: string; archetype: string }, ratio: n
   return `You sound ${vibe} — ${range.archetype} energy. ${next}`;
 }
 
-export function computeQScore(messages: string[]): QScoreResult {
+/* ================= Public pure function (kept) ================= */
+export function computeQScore(messages: string[]): QScoreData {
   const ratio = analyzeMessages(messages);
   const qScore = Math.round(100 + ratio * 500);
   const range = ranges.find(r => qScore >= r.min && qScore <= r.max) ?? ranges[0];
@@ -91,4 +94,32 @@ export function computeQScore(messages: string[]): QScoreResult {
     archetype: range.archetype,
     reflection,
   };
+}
+
+/* ================= New: exported API-style function =================
+   - Name matches how your API routes import & call it: QScoreResult(...)
+   - Accepts either string[] or chat-style {role, content}[]
+   - Async so callers can safely `await` it (matches your usage).
+*/
+type ChatLike = Array<{ role: "user" | "assistant"; content: string }>;
+
+export async function QScoreResult(
+  input: string[] | ChatLike,
+  _userHint?: string
+): Promise<QScoreData> {
+  // Normalize to string[]
+  const messages: string[] = Array.isArray(input)
+    ? (typeof input[0] === "string"
+        ? (input as string[])
+        : (input as ChatLike).map(m => (typeof m?.content === "string" ? m.content : "")).filter(Boolean))
+    : [];
+
+  if (messages.length === 0) {
+    // safe default
+    return { qScore: 250, range: "🌍 Ground", archetype: "The Builder", reflection: "Say a bit more and I’ll calibrate your Q-Score." };
+  }
+
+  // Use the pure function
+  const result = computeQScore(messages);
+  return result;
 }
