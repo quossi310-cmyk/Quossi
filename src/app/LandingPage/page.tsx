@@ -349,9 +349,9 @@ function TelegramDrawer({
   onOpenComponents?: () => void;
 }) {
   const itemsTop = [
-    { label: "Q SCORE", icon: UserIcon, onClick: onOpenComponents },
-    { label: "Daily News", icon: WalletIcon },
-    { isDivider: true as const },
+    { label: "Login", icon: UserIcon, onClick: onOpenComponents },
+    { label: "signup", icon: WalletIcon },
+    /*{ isDivider: true as const },
     { label: "Share screen", icon: UsersIcon, onClick: onShareScreen },
     { label: "voice call", icon: PhoneIcon, onClick: onVoiceCall },
     {
@@ -367,8 +367,8 @@ function TelegramDrawer({
 
   const itemsBottom = [
     { label: "Log out", icon: UserPlusIcon, onClick: onLogout },
-    { label: "Quossi Features", icon: QuestionIcon },
-  ];
+    { label: "Quossi Features", icon: QuestionIcon },*/
+  ]; 
 
   return (
     <aside className="w-[300px] h-screen bg-[#0e1621] text-white flex flex-col">
@@ -405,7 +405,7 @@ function TelegramDrawer({
       <div className="flex-1 overflow-y-auto">
         <MenuSection items={itemsTop} />
         <div className="h-px bg-white/5 my-2" />
-        <MenuSection items={itemsBottom} />
+        
       </div>
     </aside>
   );
@@ -428,8 +428,8 @@ function MenuSection({
           <button
             key={it.label}
             onClick={it.onClick}
-            className="w-full flex items-center gap-3 rounded-lg px-3 py-3 hover:bg-white/5 active:bg-white/10 transition"
-          >
+          className="w-full flex items-center gap-3 rounded-lg px-3 py-2 bg-yellow-500 hover:bg-yellow-400 active:bg-yellow-600 text-black transition mb-2 shadow-[0_0_8px_#FFEB3B] hover:shadow-[0_0_12px_#FFEB3B]"
+>
             <IconFrame>
               <it.icon className="h-[18px] w-[18px]" />
             </IconFrame>
@@ -1559,11 +1559,11 @@ export default function Home() {
             }}
             onLogout={() => {
               setMobileMenuOpen(false);
-              handleLogout();
+               router.push("/signup");
             }}
             onOpenComponents={() => {
               setMobileMenuOpen(false);
-              router.push("/components");
+              router.push("/signin");
             }}
           />
         </div>
