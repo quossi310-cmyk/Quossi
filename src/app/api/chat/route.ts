@@ -6,7 +6,6 @@ export const runtime = "nodejs";
 const XAI_API_URL = "https://api.x.ai/v1/chat/completions";
 const GROK_MODEL = "grok-4"; // or "grok-3" if you prefer
 
-// These are the scripted onboarding questions AFTER the trading name.
 const ONBOARDING_QUESTIONS: string[] = [
   "What kind of trader are you?",
   "How do you usually analyze your charts?",
@@ -96,34 +95,68 @@ Reference them naturally when relevant, for example:
 NEVER invent page numbers, quotes, or detailed passages.
 `;
 
+/**
+ * Helper: uniform JSON responses + CORS headers for browser clients.
+ * Change ACCESS_CONTROL_ALLOW_ORIGIN to a tighter URL string in production if needed.
+ */
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": process.env.QCHAT_CORS_ALLOW_ORIGIN ?? "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Max-Age": "600"
+};
+
+function jsonResponse(data: any, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      ...CORS_HEADERS
+    }
+  });
+}
+
+export async function OPTIONS() {
+  // Respond to preflight requests from browsers/mobile apps
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      ...CORS_HEADERS
+    }
+  });
+}
+
 export async function POST(req: NextRequest) {
-  let body: any;
-
+  // Protect against very large payloads
   try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json(
-      { error: "Invalid JSON body." },
-      { status: 400 }
-    );
-  }
+    // limit: 50kb - adjust if you expect larger message arrays
+    const text = await req.text();
+    if (text.length > 50_000) {
+      return jsonResponse({ error: "Request body too large." }, 413);
+    }
 
-  // 🧠 1) SPECIAL PATH: Q-SCORE EVENT FORWARDED FROM /api/qscore
-  // qscore route should call this with:
-  // { systemEvent: "qscore_result", userId, qscore: { ES, ED, qScore, zone, summary, explanation, tags } }
-  if (body?.systemEvent === "qscore_result" && body.qscore) {
-    const q = body.qscore as {
-      ES: number;
-      ED: number;
-      qScore: number;
-      zone: string;
-      summary?: string;
-      explanation?: string;
-    };
+    let body: any;
+    try {
+      body = JSON.parse(text || "{}");
+    } catch {
+      return jsonResponse({ error: "Invalid JSON body." }, 400);
+    }
 
-    const baseText =
-      q.explanation ||
-      `
+    // 1) Special forwarded system event from /api/qscore
+    if (body?.systemEvent === "qscore_result" && body.qscore) {
+      const q = body.qscore as {
+        ES: number;
+        ED: number;
+        qScore: number;
+        zone: string;
+        summary?: string;
+        explanation?: string;
+      };
+
+      const baseText =
+        q.explanation ||
+        `
 Here is your Q-Score reading:
 
 • ES (Emotional Systolic – during trading): ${q.ES}
@@ -133,55 +166,49 @@ Here is your Q-Score reading:
 ${q.summary ?? ""}
 `.trim();
 
-    // 🔹 Add QUOSSI-style follow-up: ask for screenshot upload
-    const reply =
-      baseText +
-      "\n\nI sense a lot of history inside these numbers. Take a screenshot of this Q-Score reading and upload it here when you can. I’ll stay with you and walk you through what it really means.";
+      const reply =
+        baseText +
+        "\n\nI sense a lot of history inside these numbers. Take a screenshot of this Q-Score reading and upload it here when you can. I’ll stay with you and walk you through what it really means.";
 
-    // We mark onboarding as done here.
-    const nextStep = ONBOARDING_QUESTIONS.length;
-    const done = true;
+      const nextStep = ONBOARDING_QUESTIONS.length;
+      const done = true;
 
-    const responseBody: QChatResponseBody = {
-      reply,
-      nextStep,
-      done
-    };
+      const responseBody: QChatResponseBody = {
+        reply,
+        nextStep,
+        done
+      };
 
-    return NextResponse.json(responseBody, { status: 200 });
-  }
+      return jsonResponse(responseBody, 200);
+    }
 
-  // 🧠 2) NORMAL ONBOARDING / CHAT PATH
+    // 2) Normal onboarding / chat path
+    if (!process.env.XAI_API_KEY) {
+      return jsonResponse(
+        { error: "XAI_API_KEY is not set. Set it in your environment variables." },
+        500
+      );
+    }
 
-  if (!process.env.XAI_API_KEY) {
-    return NextResponse.json(
-      { error: "XAI_API_KEY is not set. Grok calls will fail." },
-      { status: 400 }
-    );
-  }
+    const { messages, currentStep } = body as QChatRequestBody;
 
-  const { messages, currentStep } = body as QChatRequestBody;
+    if (!Array.isArray(messages) || typeof currentStep !== "number") {
+      return jsonResponse(
+        {
+          error:
+            "Body must contain { messages: {role,content}[], currentStep: number }."
+        },
+        400
+      );
+    }
 
-  if (!Array.isArray(messages) || typeof currentStep !== "number") {
-    return NextResponse.json(
-      {
-        error:
-          "Body must contain { messages: {role,content}[], currentStep: number }."
-      },
-      { status: 400 }
-    );
-  }
+    const onboardingDone = currentStep >= ONBOARDING_QUESTIONS.length;
 
-  const onboardingDone = currentStep >= ONBOARDING_QUESTIONS.length;
+    let systemPrompt: string;
 
-  // 🔹 Build the right system prompt depending on whether onboarding is done
-  let systemPrompt: string;
-
-  if (!onboardingDone) {
-    // Still asking scripted onboarding questions
-    const nextQuestion = ONBOARDING_QUESTIONS[currentStep];
-
-    systemPrompt = `
+    if (!onboardingDone) {
+      const nextQuestion = ONBOARDING_QUESTIONS[currentStep];
+      systemPrompt = `
 ${BASE_PERSONALITY_PROMPT}
 
 ${BOOKS_FRAMEWORK_PROMPT}
@@ -200,9 +227,8 @@ For this response:
 4) Do not mention onboarding, steps, Q-Score, or any system concepts.
 5) Stay focused on emotional patterns and their long-term (10-year) direction.
 `;
-  } else {
-    // ✅ Onboarding finished — now Q continues as a normal personality chat
-    systemPrompt = `
+    } else {
+      systemPrompt = `
 ${BASE_PERSONALITY_PROMPT}
 
 ${BOOKS_FRAMEWORK_PROMPT}
@@ -220,48 +246,61 @@ For this response:
 - Do NOT mention onboarding, steps, or Q-Score calculation.
 - Never give trading signals or market predictions.
 `;
-  }
+    }
 
-  try {
-    const apiRes = await fetch(XAI_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.XAI_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: GROK_MODEL,
-        stream: false,
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...messages
-        ]
-      })
-    });
-
-    if (!apiRes.ok) {
-      const errorText = await apiRes.text();
-      console.error("Grok /chat/completions error:", errorText);
-      return NextResponse.json(
-        { error: "Failed to reach Grok API", details: errorText },
-        { status: 500 }
+    // Make the external request to Grok
+    let apiRes: Response;
+    try {
+      apiRes = await fetch(XAI_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.XAI_API_KEY}`
+        },
+        // keep payload small; we do not stream here
+        body: JSON.stringify({
+          model: GROK_MODEL,
+          stream: false,
+          messages: [{ role: "system", content: systemPrompt }, ...messages]
+        })
+      });
+    } catch (err: any) {
+      console.error("Grok fetch failed:", err);
+      return jsonResponse(
+        { error: "Network error contacting Grok API.", details: String(err) },
+        502
       );
     }
 
-    const data = await apiRes.json();
+    if (!apiRes.ok) {
+      let errorText = "";
+      try {
+        errorText = await apiRes.text();
+      } catch (e) {
+        errorText = `Status ${apiRes.status}`;
+      }
+      console.error("Grok /chat/completions error:", errorText);
+      return jsonResponse(
+        { error: "Failed to reach Grok API", details: errorText },
+        502
+      );
+    }
+
+    let data: any;
+    try {
+      data = await apiRes.json();
+    } catch (err: any) {
+      console.error("Failed parsing Grok JSON:", err);
+      return jsonResponse({ error: "Invalid response from Grok." }, 502);
+    }
 
     const reply: string =
       data?.choices?.[0]?.message?.content ??
       "I’m here. Breathe. Tell me what’s moving inside you right now.";
 
-    // If onboarding isn't done, we advance the step.
-    // Once done, we keep step locked at full length but still keep chatting.
     let nextStep = currentStep;
-    if (!onboardingDone) {
-      nextStep = currentStep + 1;
-    } else {
-      nextStep = ONBOARDING_QUESTIONS.length;
-    }
+    if (!onboardingDone) nextStep = currentStep + 1;
+    else nextStep = ONBOARDING_QUESTIONS.length;
 
     const done = nextStep >= ONBOARDING_QUESTIONS.length;
 
@@ -271,12 +310,9 @@ For this response:
       done
     };
 
-    return NextResponse.json(responseBody, { status: 200 });
+    return jsonResponse(responseBody, 200);
   } catch (err: any) {
-    console.error("Grok request failed:", err);
-    return NextResponse.json(
-      { error: "Unexpected error talking to Grok", details: String(err) },
-      { status: 500 }
-    );
+    console.error("Unexpected server error:", err);
+    return jsonResponse({ error: "Internal server error", details: String(err) }, 500);
   }
 }
